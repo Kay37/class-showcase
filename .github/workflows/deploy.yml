@@ -1,5 +1,6 @@
 # Rebuilds the class list (data/class.json) and publishes the site.
-# Runs on every push, every 15 minutes, and whenever an "Add me" form is opened, edited or closed.
+# Runs on every push, every 15 minutes, whenever an "Add me" form is opened, edited or closed,
+# and when comments come in (for the comment counts).
 name: Build and deploy
 
 on:
@@ -9,11 +10,16 @@ on:
     - cron: "*/15 * * * *"
   issues:
     types: [opened, edited, closed, reopened, deleted, labeled, unlabeled]
+  discussion:
+    types: [created, deleted]
+  discussion_comment:
+    types: [created, deleted]
   workflow_dispatch:
 
 permissions:
   contents: read
   issues: read
+  discussions: read
   pages: write
   id-token: write
 

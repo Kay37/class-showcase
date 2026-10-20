@@ -14,6 +14,7 @@
   const fileCache = new Map();
   let data = null; // { at, promise } for data/class.json
   let current = null; // the open project: { owner, repo, files, main }
+  let commentCounts = {}; // "owner/repo" (lowercase) -> number of comments, from the class list
   let justAdded = null; // login of someone who just finished "Add me" in this tab
 
   // Folders and files an IntelliJ project has that nobody needs to read. Keep in step with build-data.mjs.
@@ -49,7 +50,7 @@
     } else if (parts.length === 2 && parts[0] === "~compare") {
       showCompare(parts[1]);
     } else if (parts.length >= 2 && NAME.test(parts[0]) && NAME.test(parts[1])) {
-      showProject(parts[0], parts[1], parts.slice(2).join("/"));
+      showProject(parts[0], parts[1], parts.slice(2).join("/"), query);
     } else {
       showGallery();
     }
@@ -163,8 +164,9 @@
       list.replaceChildren(el("p", "error", errorText(err)));
       return;
     }
+    commentCounts = d.comments || {};
 
-    const shared = d.assignments.filter((a) => a.members.length >= 3);
+    const shared = d.assignments.filter((a) => a.members.length >= 2);
     if (shared.length) {
       const chips = el("div", "chips");
       for (const a of shared) {
@@ -292,6 +294,13 @@
     }
   }
 
+  function commentsOn(login, name) {
+    return commentCounts[(login + "/" + name).toLowerCase()] || 0;
+  }
+  function talkLabel(n) {
+    return "\u{1F4AC} " + n + (n === 1 ? " comment" : " comments");
+  }
+
   function projectsView(login, repos, view) {
     if (view === "list") {
       const table = el("table", "list-view");
@@ -306,6 +315,8 @@
         const a = el("a", null, r.name);
         a.href = "#/" + login + "/" + r.name;
         name.append(a);
+        const talk = commentsOn(login, r.name);
+        if (talk) name.append(el("span", "talk", " " + talkLabel(talk)));
         if (r.description) name.append(el("div", "muted", r.description));
         const lang = el("td");
         if (r.language) lang.append(el("span", "lang", r.language));
@@ -318,7 +329,8 @@
     if (view === "compact") {
       const tags = el("div", "tags");
       for (const r of repos) {
-        const a = el("a", "tag", r.name);
+        const talk = commentsOn(login, r.name);
+        const a = el("a", "tag", r.name + (talk ? " \u{1F4AC}" + talk : ""));
         a.href = "#/" + login + "/" + r.name;
         a.title = (r.description ? r.description + " · " : "") + "Updated " + new Date(r.pushedAt).toLocaleDateString();
         tags.append(a);
@@ -473,6 +485,8 @@
     const meta = el("div", "meta");
     if (r.language) meta.append(el("span", "lang", r.language));
     meta.append(el("span", null, "Updated " + new Date(r.pushedAt).toLocaleDateString()));
+    const talk = commentsOn(login, r.name);
+    if (talk) meta.append(el("span", "talk", talkLabel(talk)));
     a.append(meta);
     return a;
   }
@@ -501,12 +515,71 @@
     const head = el("section", "compare-head");
     head.append(backLink(), el("h1", null, "Compare: " + a.label),
       el("p", "muted", versions.length + " classmates did this one. Pick any two to read side by side."));
+    const highlight = el("label", "check");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = true;
+    highlight.append(box, el("span", null, "Highlight what's different"));
+    head.append(highlight);
+    const shown = [null, null]; // { text, block } for each side
+    const sync = () => {
+      for (const side of shown) if (side) side.block.mark([], "only");
+      if (!box.checked || !shown[0] || !shown[1]) return;
+      const [onlyA, onlyB] = lineDiff(shown[0].text, shown[1].text);
+      shown[0].block.mark(onlyA, "only");
+      shown[1].block.mark(onlyB, "only");
+    };
+    box.addEventListener("change", sync);
     const panes = el("div", "compare");
-    panes.append(comparePane(versions, 0), comparePane(versions, Math.min(1, versions.length - 1)));
+    panes.append(
+      comparePane(versions, 0, (side) => { shown[0] = side; sync(); }),
+      comparePane(versions, Math.min(1, versions.length - 1), (side) => { shown[1] = side; sync(); })
+    );
     app.replaceChildren(head, panes);
   }
 
-  function comparePane(versions, start) {
+  // Lines only in a, and lines only in b, as ranges, ignoring spacing. Longest common subsequence of lines.
+  function lineDiff(a, b) {
+    const norm = (t) => t.replace(/\n$/, "").split("\n").map((l) => l.trim().replace(/\s+/g, " "));
+    const A = norm(a);
+    const B = norm(b);
+    if (A.length * B.length > 4000000) return [[], []];
+    const W = B.length + 1;
+    const len = new Uint16Array((A.length + 1) * W);
+    for (let i = A.length - 1; i >= 0; i--) {
+      for (let j = B.length - 1; j >= 0; j--) {
+        len[i * W + j] = A[i] === B[j] ? len[(i + 1) * W + j + 1] + 1 : Math.max(len[(i + 1) * W + j], len[i * W + j + 1]);
+      }
+    }
+    const onlyA = [];
+    const onlyB = [];
+    let i = 0;
+    let j = 0;
+    while (i < A.length || j < B.length) {
+      if (i < A.length && j < B.length && A[i] === B[j]) {
+        i++;
+        j++;
+      } else if (j >= B.length || (i < A.length && len[(i + 1) * W + j] >= len[i * W + j + 1])) {
+        if (A[i] !== "") onlyA.push(i + 1);
+        i++;
+      } else {
+        if (B[j] !== "") onlyB.push(j + 1);
+        j++;
+      }
+    }
+    const ranges = (nums) => {
+      const out = [];
+      for (const n of nums) {
+        const last = out[out.length - 1];
+        if (last && last[1] === n - 1) last[1] = n;
+        else out.push([n, n]);
+      }
+      return out;
+    };
+    return [ranges(onlyA), ranges(onlyB)];
+  }
+
+  function comparePane(versions, start, onShown) {
     const pane = el("div", "pane");
     const bar = el("div", "pane-bar");
     const who = el("select");
@@ -520,13 +593,25 @@
     const file = el("select");
     file.setAttribute("aria-label", "File");
     const open = el("a", "btn small", "Open project");
-    bar.append(who, file, open);
+    const run = el("button", "btn small", "\u25B6 Run");
+    run.type = "button";
+    bar.append(who, file, run, open);
     const body = el("div", "pane-body");
-    pane.append(bar, body);
+    const runBox = el("section", "run");
+    runBox.hidden = true;
+    pane.append(bar, runBox, body);
+    run.addEventListener("click", () => {
+      const v = versions[Number(who.value)];
+      openRun(runBox, { owner: v.login, repo: v.repo.name, files: v.repo.files, main: v.repo.main });
+    });
 
     function pickPerson() {
       const v = versions[Number(who.value)];
       open.href = "#/" + v.login + "/" + v.repo.name;
+      if (!runBox.hidden && !busy) {
+        runBox.hidden = true;
+        runBox.replaceChildren();
+      }
       file.replaceChildren();
       const files = [...v.repo.files].sort((x, y) => (y.endsWith(".java") - x.endsWith(".java")) || x.localeCompare(y));
       for (const f of files) {
@@ -548,7 +633,11 @@
       body.replaceChildren(el("p", "muted pad", "Loading…"));
       try {
         const text = await getFile(v.login, v.repo.name, path);
-        if (versions[Number(who.value)] === v && file.value === path) body.replaceChildren(codeBlock(text, path));
+        if (versions[Number(who.value)] === v && file.value === path) {
+          const block = codeBlock(text, path);
+          body.replaceChildren(block);
+          if (onShown) onShown({ text, block });
+        }
       } catch (err) {
         body.replaceChildren(el("p", "error pad", errorText(err)));
       }
@@ -873,7 +962,7 @@
 
   // ---------- project viewer ----------
 
-  async function showProject(owner, repo, path) {
+  async function showProject(owner, repo, path, query) {
     document.title = repo + " · " + (cfg.title || "Class Code Showcase");
     const same = current && current.owner === owner && current.repo === repo;
     if (!same) {
@@ -902,7 +991,17 @@
       renderShell(owner, repo, files);
     }
     if (!path) path = current.main || await pickStartFile(owner, repo, current.files);
-    openFile(path);
+    openFile(path, lineRange(query));
+  }
+
+  // "L=12" or "L=12-15" from a route's query.
+  function lineRange(query) {
+    const m = new URLSearchParams(query || "").get("L");
+    const nums = String(m || "").match(/^(\d+)(?:-(\d+))?$/);
+    if (!nums) return null;
+    const a = Number(nums[1]);
+    const b = Number(nums[2] || nums[1]);
+    return a > 0 && b > 0 ? [Math.min(a, b), Math.max(a, b)] : null;
   }
 
   function renderShell(owner, repo, files) {
@@ -915,8 +1014,11 @@
     const links = el("div", "links");
     const runBtn = el("button", "run-open", "▶ Run");
     runBtn.type = "button";
+    const historyBtn = el("button", "btn", "\u{1F552} How they built it");
+    historyBtn.type = "button";
     links.append(
       runBtn,
+      historyBtn,
       extLink("https://github.com/" + owner + "/" + repo, "View on GitHub"),
       extLink("https://github.dev/" + owner + "/" + repo, "Open in web editor")
     );
@@ -924,6 +1026,9 @@
     const runBox = el("section", "run");
     runBox.hidden = true;
     runBtn.addEventListener("click", () => openRun(runBox));
+    const historyBox = el("section", "history");
+    historyBox.hidden = true;
+    historyBtn.addEventListener("click", () => openHistory(historyBox, owner, repo));
 
     const layout = el("div", "layout");
     const side = el("nav", "files");
@@ -936,7 +1041,7 @@
 
     const comments = el("section", "comments");
     comments.id = "comments";
-    app.append(bar, runBox, layout, comments);
+    app.append(bar, runBox, historyBox, layout, comments);
     renderComments(owner, repo, comments);
   }
 
@@ -948,7 +1053,7 @@
     return withMain || java[0] || files.find((f) => /readme/i.test(f)) || files[0] || "";
   }
 
-  async function openFile(path) {
+  async function openFile(path, lines) {
     const viewer = document.getElementById("viewer");
     if (!viewer) return;
     document.querySelectorAll(".files a.active").forEach((a) => a.classList.remove("active"));
@@ -961,25 +1066,110 @@
       viewer.replaceChildren(el("p", "muted pad", "This repo has no files to show."));
       return;
     }
-    viewer.replaceChildren(el("div", "file-head", path), el("p", "muted pad", "Loading…"));
+    const head = el("div", "file-head");
+    head.append(el("span", null, path));
+    viewer.replaceChildren(head, el("p", "muted pad", "Loading…"));
     let text;
     try {
       text = await getFile(current.owner, current.repo, path);
     } catch (err) {
-      viewer.replaceChildren(el("div", "file-head", path), el("p", "error pad", errorText(err)));
+      viewer.replaceChildren(head, el("p", "error pad", errorText(err)));
       return;
     }
-    viewer.replaceChildren(el("div", "file-head", path), codeBlock(text, path));
+    const proj = current;
+
+    // Click a line number for a link to that line; shift-click for a range.
+    let picked = lines;
+    const block = codeBlock(text, path, {
+      onLine: (n, shift) => {
+        picked = shift && picked ? [Math.min(picked[0], n), Math.max(picked[1], n)] : [n, n];
+        block.mark([picked], "picked");
+        const range = picked[0] === picked[1] ? String(picked[0]) : picked[0] + "-" + picked[1];
+        const hash = "#/" + proj.owner + "/" + proj.repo + "/" + path.split("/").map(encodeURIComponent).join("/") + "?L=" + range;
+        history.replaceState(null, "", location.pathname + location.search + hash);
+        const url = location.href;
+        const done = () => toast("Link to line " + range + " copied. Paste it in a comment.");
+        if (navigator.clipboard) navigator.clipboard.writeText(url).then(done, () => toast("Link to line " + range + " is in the address bar."));
+        else toast("Link to line " + range + " is in the address bar.");
+      }
+    });
+    head.append(el("span", "muted hint", "Click a line number to link to it"));
+
+    if (/\.(md|markdown)$/i.test(path) && window.marked && window.DOMPurify) {
+      const doc = renderMarkdown(text, proj, path);
+      const toggle = el("button", "link", "Show source");
+      toggle.type = "button";
+      toggle.addEventListener("click", () => {
+        const showingDoc = doc.isConnected;
+        (showingDoc ? doc : block).replaceWith(showingDoc ? block : doc);
+        toggle.textContent = showingDoc ? "Show formatted" : "Show source";
+      });
+      head.lastChild.replaceWith(toggle);
+      viewer.replaceChildren(head, doc);
+      return;
+    }
+    viewer.replaceChildren(head, block);
+    if (lines) {
+      block.mark([lines], "picked");
+      const first = block.querySelector(".band.picked");
+      if (first) first.scrollIntoView({ block: "center" });
+    }
   }
 
-  function codeBlock(text, path) {
+  // A README as a formatted page. Links to files in the repo open here; images load from GitHub.
+  function renderMarkdown(text, proj, path) {
+    const doc = el("article", "markdown");
+    doc.innerHTML = DOMPurify.sanitize(marked.parse(text));
+    const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+    const rel = (url) => !/^([a-z]+:|#|\/\/)/i.test(url);
+    const clean = (p) => {
+      const out = [];
+      for (const part of (dir + p).split("/")) {
+        if (part === "..") out.pop();
+        else if (part && part !== ".") out.push(part);
+      }
+      return out.join("/");
+    };
+    doc.querySelectorAll("img[src]").forEach((img) => {
+      const src = img.getAttribute("src");
+      if (rel(src)) img.src = "https://raw.githubusercontent.com/" + proj.owner + "/" + proj.repo + "/HEAD/" + clean(src);
+    });
+    doc.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.getAttribute("href");
+      if (href.startsWith("#")) {
+        a.removeAttribute("href");
+      } else if (rel(href)) {
+        a.href = "#/" + proj.owner + "/" + proj.repo + "/" + clean(href.split("#")[0]);
+      } else {
+        a.target = "_blank";
+        a.rel = "noopener";
+      }
+    });
+    return doc;
+  }
+
+  // opts.onLine(n, shift): the visitor clicked line number n. The result has mark(ranges, kind) to tint lines.
+  function codeBlock(text, path, opts) {
     const ext = (path.split(".").pop() || "").toLowerCase();
     const lang = LANGS[ext] || "plaintext";
     const lines = text.replace(/\n$/, "").split("\n");
     const wrap = el("div", "code");
     const gutter = el("pre", "gutter");
     gutter.setAttribute("aria-hidden", "true");
-    gutter.textContent = lines.map((_, i) => i + 1).join("\n");
+    if (opts && opts.onLine) {
+      gutter.classList.add("linked");
+      for (let i = 1; i <= lines.length; i++) {
+        const n = el("span", null, String(i));
+        n.dataset.n = i;
+        gutter.append(n);
+      }
+      gutter.addEventListener("click", (e) => {
+        const n = e.target.dataset && Number(e.target.dataset.n);
+        if (n) opts.onLine(n, e.shiftKey);
+      });
+    } else {
+      gutter.textContent = lines.map((_, i) => i + 1).join("\n");
+    }
     const pre = el("pre", "source");
     const code = el("code", "hljs");
     if (window.hljs && hljs.getLanguage(lang)) {
@@ -989,7 +1179,139 @@
     }
     pre.append(code);
     wrap.append(gutter, pre);
+    wrap.lineCount = lines.length;
+    // Tint whole lines: ranges like [[3, 5], [9, 9]] (1-based). Each kind replaces its own earlier marks.
+    wrap.mark = (ranges, kind) => {
+      wrap.querySelectorAll(".band." + kind).forEach((b) => b.remove());
+      for (const [a, b] of ranges) {
+        const band = el("div", "band " + kind);
+        band.style.setProperty("--n", a - 1);
+        band.style.setProperty("--k", b - a + 1);
+        wrap.append(band);
+      }
+    };
     return wrap;
+  }
+
+  function toast(text) {
+    let t = document.getElementById("toast");
+    if (!t) {
+      t = el("div", "toast");
+      t.id = "toast";
+      t.setAttribute("role", "status");
+      document.body.append(t);
+    }
+    t.textContent = text;
+    t.classList.add("on");
+    clearTimeout(t.timer);
+    t.timer = setTimeout(() => t.classList.remove("on"), 2600);
+  }
+
+  // ---------- how they built it (commit history) ----------
+
+  async function openHistory(box, owner, repo) {
+    if (!box.hidden) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    if (box.dataset.loaded) return;
+    if (!cfg.api) {
+      box.replaceChildren(el("p", "muted pad", "History isn't available on this site."));
+      return;
+    }
+    box.replaceChildren(el("p", "muted pad", "Loading the history…"));
+    let commits;
+    try {
+      const res = await fetch(cfg.api + "/api/commits?repo=" + encodeURIComponent(owner + "/" + repo));
+      const body = await res.json();
+      if (!res.ok) throw new Error(res.status === 404 ? "History is only shown for projects on the showcase." : body.error);
+      commits = body.commits.reverse(); // oldest first: the story in order
+    } catch (err) {
+      box.replaceChildren(el("p", "error pad", err.message || "Couldn't load the history."));
+      return;
+    }
+    box.dataset.loaded = "1";
+    if (!commits.length) {
+      box.replaceChildren(el("p", "muted pad", "No commits yet."));
+      return;
+    }
+    const head = el("div", "history-head");
+    head.append(el("h2", null, "How they built it"),
+      el("span", "muted", commits.length + (commits.length === 1 ? " step" : " steps") + ", oldest first"));
+    const steps = el("ol", "steps");
+    const detail = el("div", "step-detail");
+    const items = commits.map((c, i) => {
+      const li = el("li");
+      const b = el("button", "step");
+      b.type = "button";
+      b.append(el("span", "step-n", "Step " + (i + 1)), el("span", "step-msg", c.message.split("\n")[0]),
+        el("span", "muted step-date", new Date(c.date).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })));
+      b.addEventListener("click", () => show(i));
+      li.append(b);
+      steps.append(li);
+      return b;
+    });
+    const layout = el("div", "history-layout");
+    layout.append(steps, detail);
+    box.replaceChildren(head, layout);
+
+    async function show(i) {
+      items.forEach((b, j) => b.classList.toggle("on", j === i));
+      const c = commits[i];
+      const nav = el("div", "step-nav");
+      const prev = el("button", "btn small", "← Previous step");
+      const next = el("button", "btn small", "Next step →");
+      prev.type = next.type = "button";
+      prev.disabled = i === 0;
+      next.disabled = i === commits.length - 1;
+      prev.addEventListener("click", () => show(i - 1));
+      next.addEventListener("click", () => show(i + 1));
+      nav.append(prev, el("strong", null, "Step " + (i + 1) + " of " + commits.length), next);
+      detail.replaceChildren(nav, el("p", "muted pad", "Loading what changed…"));
+      let full;
+      try {
+        const res = await fetch(cfg.api + "/api/commit?repo=" + encodeURIComponent(owner + "/" + repo) + "&sha=" + c.sha);
+        full = await res.json();
+        if (!res.ok) throw new Error(full.error);
+      } catch (err) {
+        detail.replaceChildren(nav, el("p", "error pad", "Couldn't load this step."));
+        return;
+      }
+      if (!items[i].classList.contains("on")) return; // they clicked another step meanwhile
+      const msg = el("div", "commit-msg", full.message);
+      const files = el("div", "changes");
+      const visible = full.files.filter((f) => !f.filename.split("/").some((p) => HIDDEN_DIRS.has(p)))
+        .sort((a, b) => /\.java$/i.test(b.filename) - /\.java$/i.test(a.filename));
+      if (!visible.length) files.append(el("p", "muted pad", "No code files changed in this step."));
+      for (const f of visible) files.append(renderChange(f));
+      const hidden = full.files.length - visible.length;
+      if (hidden) files.append(el("p", "muted small", hidden + " IntelliJ settings file" + (hidden === 1 ? "" : "s") + " also changed (hidden)."));
+      detail.replaceChildren(nav, msg, files);
+    }
+    show(0);
+  }
+
+  function renderChange(f) {
+    const box = el("details", "change");
+    box.open = /\.java$/i.test(f.filename); // Java first and open; .gitignore, pom.xml and the like start closed
+    const head = el("summary");
+    const words = { added: "new file", removed: "deleted", renamed: "renamed", modified: "changed" };
+    head.append(el("strong", null, f.filename), el("span", "muted", " " + (words[f.status] || f.status)),
+      el("span", "plus", " +" + f.additions), el("span", "minus", " −" + f.deletions));
+    box.append(head);
+    if (!f.patch) {
+      box.append(el("p", "muted pad", f.additions + f.deletions ? "Too big to show here." : "No line changes."));
+      return box;
+    }
+    const pre = el("pre", "patch");
+    for (const line of f.patch.split("\n")) {
+      if (line.startsWith("\\")) continue; // "\ No newline at end of file"
+      const kind = line.startsWith("@@") ? "hunk" : line[0] === "+" ? "add" : line[0] === "-" ? "del" : "same";
+      pre.append(el("span", kind, (kind === "hunk" ? "⋯ " + (line.match(/@@[^@]*@@\s*(.*)/) || [, ""])[1] : line) + "\n"));
+    }
+    box.append(pre);
+    return box;
   }
 
   // ---------- run (Java in the browser, with CheerpJ) ----------
@@ -1046,13 +1368,13 @@
     return mains;
   }
 
-  async function openRun(box) {
+  async function openRun(box, project) {
     if (!box.hidden) {
       box.scrollIntoView({ behavior: "smooth", block: "nearest" });
       return;
     }
     box.hidden = false;
-    const proj = current;
+    const proj = project || current;
     const paths = runFiles(proj.files);
     box.replaceChildren(el("p", "muted pad", "Getting the Java files…"));
     let texts;
@@ -1063,7 +1385,7 @@
       box.hidden = true;
       return;
     }
-    if (current !== proj) return;
+    if (!box.isConnected || box.hidden) return;
     const mains = findMains(paths, texts);
     if (!paths.length || !mains.length) {
       box.replaceChildren(el("p", "muted pad", paths.length

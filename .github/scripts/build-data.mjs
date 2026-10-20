@@ -158,6 +158,50 @@ function groupAssignments(people) {
   return out.sort((a, b) => b.members.length - a.members.length || a.label.localeCompare(b.label));
 }
 
+// ---------- comments ----------
+
+// How many comments each project has. giscus keeps one discussion per project, titled "owner/repo".
+// The "someone commented" note our notify workflow posts doesn't count.
+async function commentCounts() {
+  const categoryId = cfg.giscus && cfg.giscus.categoryId;
+  if (!categoryId) return {};
+  const [owner, name] = SITE.split("/");
+  const counts = {};
+  let after = null;
+  do {
+    const res = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `query($owner: String!, $name: String!, $cat: ID!, $after: String) {
+          repository(owner: $owner, name: $name) {
+            discussions(first: 100, after: $after, categoryId: $cat) {
+              pageInfo { hasNextPage endCursor }
+              nodes { title comments(first: 100) { nodes { author { login } replies { totalCount } } } }
+            }
+          }
+        }`,
+        variables: { owner, name, cat: categoryId, after }
+      })
+    }).then((r) => r.json()).catch(() => null);
+    const page = res && res.data && res.data.repository && res.data.repository.discussions;
+    if (!page) {
+      console.warn("Couldn't read comment counts", res && res.errors);
+      break;
+    }
+    for (const d of page.nodes) {
+      let n = 0;
+      for (const c of d.comments.nodes) {
+        if (!c.author || c.author.login !== "github-actions") n += 1;
+        n += c.replies.totalCount;
+      }
+      if (n) counts[d.title.toLowerCase()] = n;
+    }
+    after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+  } while (after);
+  return counts;
+}
+
 // ---------- main ----------
 
 const picks = new Map(); // lowercase login -> { login, repos: null or Set }
@@ -195,8 +239,9 @@ for (const p of picks.values()) {
   people.push({ login, picked: p.repos !== null, repos: shown });
 }
 
-const data = { generatedAt: new Date().toISOString(), people, preloaded, assignments: groupAssignments(people) };
+const data = { generatedAt: new Date().toISOString(), people, preloaded, assignments: groupAssignments(people),
+  comments: await commentCounts() };
 fs.mkdirSync("data", { recursive: true });
 fs.writeFileSync("data/class.json", JSON.stringify(data));
 console.log(people.length + " people shown, " + preloaded.length + " preloaded, " + people.reduce((n, p) => n + p.repos.length, 0) + " repos, " +
-  data.assignments.length + " shared assignments");
+  data.assignments.length + " shared assignments, " + Object.keys(data.comments).length + " projects with comments");
