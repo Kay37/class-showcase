@@ -187,3 +187,9 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); fon
   .code pre { font-size: 12.5px; }
   .compare { grid-template-columns: 1fr; }
 }
+
+/* ---------- add me status ---------- */
+.status:empty { display: none; }
+.status { margin: 14px 0; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); }
+.status.ok { border-color: #2e9d5b; }
+.status .btn { margin-left: 4px; }

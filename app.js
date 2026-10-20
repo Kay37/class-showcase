@@ -77,15 +77,22 @@
   }
 
   function findRepo(d, owner, repo) {
-    const person = d.people.find((p) => p.login.toLowerCase() === owner.toLowerCase());
-    const r = person && person.repos.find((x) => x.name.toLowerCase() === repo.toLowerCase());
-    return r ? { login: person.login, repo: r } : null;
+    for (const group of [d.people, d.preloaded || []]) {
+      const person = group.find((p) => p.login.toLowerCase() === owner.toLowerCase());
+      const r = person && person.repos.find((x) => x.name.toLowerCase() === repo.toLowerCase());
+      if (r) return { login: person.login, repo: r };
+    }
+    return null;
+  }
+
+  function findPreloaded(d, login) {
+    return (d.preloaded || []).find((p) => p.login.toLowerCase() === login.toLowerCase()) || null;
   }
 
   // ---------- GitHub (only for repos the class list doesn't have, and for "Add me") ----------
 
-  async function getJson(url) {
-    const cached = cacheGet(url);
+  async function getJson(url, fresh) {
+    const cached = fresh ? null : cacheGet(url);
     if (cached) return cached;
     const res = await fetch(url, { headers: { Accept: "application/vnd.github+json" } });
     if (res.status === 404) throw new Error("not-found");
@@ -149,7 +156,7 @@
 
     let d;
     try {
-      d = await loadData();
+      d = await withFreshPicks(await loadData());
     } catch (err) {
       list.replaceChildren(el("p", "error", errorText(err)));
       return;
@@ -188,6 +195,67 @@
       list.append(person);
     }
     list.append(el("p", "muted updated", "List updated " + timeAgo(d.generatedAt) + ". It refreshes every 15 minutes."));
+  }
+
+  // The class list is rebuilt a minute or two after each "Add me" form. Until then, read new forms straight
+  // from GitHub so people show up right away. If GitHub is limiting us, the built list is still fine.
+  async function withFreshPicks(d) {
+    let issues;
+    try {
+      issues = await getJson("https://api.github.com/repos/" + SITE_REPO +
+        "/issues?labels=showcase&state=open&sort=updated&direction=desc&per_page=30");
+    } catch (err) {
+      return d;
+    }
+    const fresh = new Map();
+    for (const issue of issues) {
+      if (issue.pull_request || issue.updated_at <= d.generatedAt) continue;
+      const key = issue.user.login.toLowerCase();
+      if (!fresh.has(key)) fresh.set(key, { login: issue.user.login, picks: parsePicks(issue.body, issue.user.login) });
+    }
+    if (fresh.size === 0) return d;
+    const people = d.people.filter((p) => !fresh.has(p.login.toLowerCase()));
+    const wanted = (f, r) => (f.picks === null ? r.language === "Java" : f.picks.has(r.name.toLowerCase()));
+    for (const f of fresh.values()) {
+      const known = findPreloaded(d, f.login);
+      if (known) {
+        people.push({ login: known.login, picked: f.picks !== null, repos: known.repos.filter((r) => wanted(f, r)) });
+        continue;
+      }
+      try {
+        const repos = await getJson("https://api.github.com/users/" + f.login + "/repos?type=owner&per_page=100&sort=pushed");
+        people.push({
+          login: f.login,
+          picked: f.picks !== null,
+          repos: repos
+            .filter((r) => !r.private && !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase())
+            .map((r) => ({ name: r.name, description: r.description || "", language: r.language || "",
+              pushedAt: r.pushed_at, files: null, main: null }))
+            .filter((r) => wanted(f, r))
+        });
+      } catch (err) {
+        const old = d.people.find((p) => p.login.toLowerCase() === f.login.toLowerCase());
+        if (old) people.push(old);
+      }
+    }
+    return { ...d, people };
+  }
+
+  // An "Add me" form body looks like "### Projects to show\n\nrepo-one\nrepo-two". Only the author's own
+  // repos count; an empty form means all their public Java repos (null). Same rules as build-data.mjs.
+  function parsePicks(body, login) {
+    const text = String(body || "").split(/###\s*Projects to show/i).pop();
+    const names = new Set();
+    for (let line of text.split("\n")) {
+      line = line.trim().replace(/^[-*]\s*/, "").replace(/^https?:\/\/github\.com\//i, "");
+      if (line.includes("/")) {
+        const [owner, name] = line.split("/");
+        if (owner.toLowerCase() !== login.toLowerCase()) continue;
+        line = name;
+      }
+      if (NAME.test(line)) names.add(line.toLowerCase());
+    }
+    return names.size ? names : null;
   }
 
   function projectCard(login, r) {
@@ -302,9 +370,19 @@
     input.autocomplete = "off";
     input.required = true;
     try { input.value = localStorage.getItem("showcase-username") || ""; } catch (e) { /* fine */ }
+    const names = el("datalist");
+    names.id = "classmate-names";
+    input.setAttribute("list", names.id);
+    loadData().then((d) => {
+      for (const p of d.preloaded || []) {
+        const o = el("option");
+        o.value = p.login;
+        names.append(o);
+      }
+    }).catch(() => { /* no suggestions */ });
     const find = el("button", null, "Find my projects");
     find.type = "submit";
-    form.append(input, find);
+    form.append(input, names, find);
     const results = el("div", "picker");
     page.append(form, results);
     app.append(page);
@@ -318,20 +396,25 @@
       }
       try { localStorage.setItem("showcase-username", login); } catch (err) { /* fine */ }
       results.replaceChildren(el("p", "muted", "Looking up " + login + "…"));
+      let d = null;
+      try { d = await loadData(); } catch (err) { /* no list yet: ask GitHub */ }
+      const known = d && findPreloaded(d, login);
       let repos;
-      try {
-        repos = await getJson("https://api.github.com/users/" + login + "/repos?type=owner&per_page=100&sort=pushed");
-      } catch (err) {
-        results.replaceChildren(el("p", "error", err.message === "not-found" ? "No GitHub user named " + login + "." : errorText(err)));
-        return;
+      if (known) {
+        repos = known.repos.map((r) => ({ name: r.name, language: r.language, pushed_at: r.pushedAt }));
+      } else {
+        try {
+          repos = await getJson("https://api.github.com/users/" + login + "/repos?type=owner&per_page=100&sort=pushed");
+        } catch (err) {
+          results.replaceChildren(el("p", "error", err.message === "not-found" ? "No GitHub user named " + login + "." : errorText(err)));
+          return;
+        }
+        repos = repos.filter((r) => !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase());
       }
-      repos = repos.filter((r) => !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase());
       // Tick what shows today if they've added before; otherwise their Java repos.
       let showing = null;
-      try {
-        const hit = (await loadData()).people.find((p) => p.login.toLowerCase() === login.toLowerCase());
-        if (hit) showing = new Set(hit.repos.map((r) => r.name.toLowerCase()));
-      } catch (err) { /* no list yet */ }
+      const hit = d && d.people.find((p) => p.login.toLowerCase() === login.toLowerCase());
+      if (hit) showing = new Set(hit.repos.map((r) => r.name.toLowerCase()));
       renderPicker(results, login, repos, showing);
     });
     if (input.value) form.requestSubmit();
@@ -384,9 +467,52 @@
       go.classList.toggle("disabled", names.length === 0);
     }
     list.addEventListener("change", update);
-    go.addEventListener("click", (e) => { if (go.classList.contains("disabled")) e.preventDefault(); });
+    const status = el("div", "status");
+    go.addEventListener("click", (e) => {
+      if (go.classList.contains("disabled")) {
+        e.preventDefault();
+        return;
+      }
+      waitForForm(status, login, new Date(Date.now() - 60000).toISOString());
+    });
     update();
-    box.replaceChildren(el("h2", null, "Pick your projects"), tools, list, go, steps);
+    box.replaceChildren(el("h2", null, "Pick your projects"), tools, list, go, status, steps);
+  }
+
+  // Check GitHub for their new form when they come back to this tab (and on a button), not on a timer,
+  // so a whole class doing this at once stays well under GitHub's limit.
+  function waitForForm(box, login, since) {
+    const again = el("button", "link", "Check again");
+    again.type = "button";
+    const msg = el("span", null, "Waiting for you to click Create on GitHub… ");
+    box.className = "status waiting";
+    box.replaceChildren(msg, again);
+    let done = false;
+    async function check() {
+      if (done) return;
+      msg.textContent = "Checking… ";
+      let issues = [];
+      try {
+        issues = await getJson("https://api.github.com/repos/" + SITE_REPO +
+          "/issues?labels=showcase&state=open&creator=" + encodeURIComponent(login) + "&sort=created&direction=desc&per_page=1", true);
+      } catch (err) {
+        msg.textContent = errorText(err) + " ";
+        return;
+      }
+      if (issues.length && issues[0].created_at >= since) {
+        done = true;
+        window.removeEventListener("focus", check);
+        const see = el("a", "btn primary", "See the gallery");
+        see.href = "#/";
+        box.className = "status ok";
+        box.replaceChildren(el("span", null, "You're on the site! Your projects show for everyone now. "), see);
+      } else {
+        msg.textContent = "Not yet. After you click Create on GitHub, come back here. ";
+      }
+    }
+    again.addEventListener("click", check);
+    window.addEventListener("focus", check);
+    window.addEventListener("hashchange", () => { done = true; window.removeEventListener("focus", check); }, { once: true });
   }
 
   // ---------- project viewer ----------
@@ -401,7 +527,7 @@
       let files;
       let main = null;
       const hit = await loadData().then((d) => findRepo(d, owner, repo)).catch(() => null);
-      if (hit) {
+      if (hit && hit.repo.files) {
         files = hit.repo.files;
         main = hit.repo.main;
       } else {

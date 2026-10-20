@@ -1,4 +1,5 @@
-// Builds data/class.json from the "Add me" forms: who opted in, which repos they picked, each repo's files and main file,
+// Builds data/class.json from the "Add me" forms: who opted in, which repos they picked,
+// plus every public repo of the classmates in config.js, preloaded but not shown, so their picks appear at once, each repo's files and main file,
 // and which repos are the same assignment. It runs in a GitHub Action (deploy.yml) with the Action's
 // token, so visitors don't each spend GitHub's 60-requests-an-hour limit.
 // Locally: GITHUB_TOKEN=$(gh auth token) node .github/scripts/build-data.mjs  (run from the site folder)
@@ -59,7 +60,8 @@ async function previousRepos() {
   try {
     const res = await fetch("https://" + owner.toLowerCase() + ".github.io/" + repo + "/data/class.json");
     if (res.ok) {
-      for (const p of (await res.json()).people) {
+      const old = await res.json();
+      for (const p of [...old.people, ...(old.preloaded || [])]) {
         for (const r of p.repos) before.set((p.login + "/" + r.name).toLowerCase(), r);
       }
     }
@@ -166,23 +168,33 @@ for (const issue of issues) {
   if (!picks.has(login.toLowerCase())) picks.set(login.toLowerCase(), { login, repos: parsePicks(issue.body, login) });
 }
 
+for (const u of cfg.classmates || []) {
+  if (NAME.test(u) && !picks.has(u.toLowerCase())) picks.set(u.toLowerCase(), { login: u, repos: null, preloadOnly: true });
+}
+
 const before = await previousRepos();
-const people = [];
+const people = [];    // opted in: shown in the gallery
+const preloaded = []; // everyone known, with all their public repos: for the Add me picker and instant picks
 for (const p of picks.values()) {
   const list = await gh("/users/" + p.login + "/repos?type=owner&sort=pushed&per_page=100");
   if (!list) {
     console.warn("No GitHub user named " + p.login);
     continue;
   }
-  const chosen = list.filter((r) => !r.private && r.full_name.toLowerCase() !== SITE.toLowerCase() &&
-    (p.repos === null ? r.language === "Java" && !r.fork : p.repos.has(r.name.toLowerCase())));
-  const repos = [];
-  for (const r of chosen) repos.push(await describe(r, before.get(r.full_name.toLowerCase())));
-  people.push({ login: list[0] ? list[0].owner.login : p.login, picked: p.repos !== null, repos });
+  const login = list[0] ? list[0].owner.login : p.login;
+  const all = [];
+  for (const r of list) {
+    if (r.private || r.fork || r.full_name.toLowerCase() === SITE.toLowerCase()) continue;
+    all.push(await describe(r, before.get(r.full_name.toLowerCase())));
+  }
+  preloaded.push({ login, repos: all });
+  if (p.preloadOnly) continue;
+  const shown = all.filter((r) => (p.repos === null ? r.language === "Java" : p.repos.has(r.name.toLowerCase())));
+  people.push({ login, picked: p.repos !== null, repos: shown });
 }
 
-const data = { generatedAt: new Date().toISOString(), people, assignments: groupAssignments(people) };
+const data = { generatedAt: new Date().toISOString(), people, preloaded, assignments: groupAssignments(people) };
 fs.mkdirSync("data", { recursive: true });
 fs.writeFileSync("data/class.json", JSON.stringify(data));
-console.log(people.length + " people, " + people.reduce((n, p) => n + p.repos.length, 0) + " repos, " +
+console.log(people.length + " people shown, " + preloaded.length + " preloaded, " + people.reduce((n, p) => n + p.repos.length, 0) + " repos, " +
   data.assignments.length + " shared assignments");
