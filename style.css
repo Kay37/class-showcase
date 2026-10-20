@@ -193,3 +193,5 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); fon
 .status { margin: 14px 0; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); }
 .status.ok { border-color: #2e9d5b; }
 .status .btn { margin-left: 4px; }
+.intro .status, .gallery > .status { margin: 0 0 16px; scroll-margin-top: 80px; }
+.person.mine { outline: 2px solid var(--accent); outline-offset: 8px; border-radius: var(--radius); }

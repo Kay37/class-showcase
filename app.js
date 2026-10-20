@@ -14,6 +14,7 @@
   const fileCache = new Map();
   let data = null; // { at, promise } for data/class.json
   let current = null; // the open project: { owner, repo, files, main }
+  let justAdded = null; // login of someone who just finished "Add me" in this tab
 
   // Folders and files an IntelliJ project has that nobody needs to read. Keep in step with build-data.mjs.
   const HIDDEN_DIRS = new Set([".idea", ".git", ".mvn", "target", "out", "build", "bin", ".gradle", "node_modules"]);
@@ -156,7 +157,7 @@
 
     let d;
     try {
-      d = await withFreshPicks(await loadData());
+      d = await withFreshPicks(await loadData(), Boolean(justAdded));
     } catch (err) {
       list.replaceChildren(el("p", "error", errorText(err)));
       return;
@@ -185,6 +186,7 @@
     list.replaceChildren(el("h2", "section-title", "Classmates"));
     for (const p of people) {
       const person = el("div", "person");
+      person.dataset.login = p.login.toLowerCase();
       const head = el("div", "person-head");
       head.append(avatar(p.login), el("h3", null, p.login),
         el("span", "count", p.repos.length + (p.repos.length === 1 ? " project" : " projects")));
@@ -195,15 +197,29 @@
       list.append(person);
     }
     list.append(el("p", "muted updated", "List updated " + timeAgo(d.generatedAt) + ". It refreshes every 15 minutes."));
+    if (justAdded) {
+      const mine = list.querySelector('.person[data-login="' + CSS.escape(justAdded.toLowerCase()) + '"]');
+      const banner = el("div", "status ok", mine
+        ? "You're on the site! Here are your projects. Everyone can see them now."
+        : "You're on the site! Your projects will show here in a couple of minutes.");
+      if (mine) {
+        mine.before(banner);
+        mine.classList.add("mine");
+        banner.scrollIntoView({ block: "start" });
+      } else {
+        intro.prepend(banner);
+      }
+      justAdded = null;
+    }
   }
 
   // The class list is rebuilt a minute or two after each "Add me" form. Until then, read new forms straight
   // from GitHub so people show up right away. If GitHub is limiting us, the built list is still fine.
-  async function withFreshPicks(d) {
+  async function withFreshPicks(d, skipCache) {
     let issues;
     try {
       issues = await getJson("https://api.github.com/repos/" + SITE_REPO +
-        "/issues?labels=showcase&state=open&sort=updated&direction=desc&per_page=30");
+        "/issues?labels=showcase&state=open&sort=updated&direction=desc&per_page=30", skipCache);
     } catch (err) {
       return d;
     }
@@ -455,8 +471,8 @@
     go.rel = "noopener";
     const steps = el("ol", "after");
     const s1 = el("li");
-    s1.append("On GitHub, click ", el("strong", null, "Create"), ". That's it.");
-    steps.append(s1, el("li", null, "Come back to the gallery. Your picks show up within a few minutes."),
+    s1.append("On GitHub, click ", el("strong", null, "Create"), ".");
+    steps.append(s1, el("li", null, "Come back to this tab. It takes you to the gallery with your projects."),
       el("li", null, "Want to change them later? Do this again. Your newest one counts."));
 
     function update() {
@@ -484,7 +500,7 @@
   function waitForForm(box, login, since) {
     const again = el("button", "link", "Check again");
     again.type = "button";
-    const msg = el("span", null, "Waiting for you to click Create on GitHub… ");
+    const msg = el("span", null, "GitHub opened in a new tab. Click Create there, then come back to this tab. ");
     box.className = "status waiting";
     box.replaceChildren(msg, again);
     let done = false;
@@ -502,12 +518,10 @@
       if (issues.length && issues[0].created_at >= since) {
         done = true;
         window.removeEventListener("focus", check);
-        const see = el("a", "btn primary", "See the gallery");
-        see.href = "#/";
-        box.className = "status ok";
-        box.replaceChildren(el("span", null, "You're on the site! Your projects show for everyone now. "), see);
+        justAdded = login;
+        location.hash = "#/";
       } else {
-        msg.textContent = "Not yet. After you click Create on GitHub, come back here. ";
+        msg.textContent = "Not yet. Click Create on GitHub, then come back to this tab. ";
       }
     }
     again.addEventListener("click", check);
