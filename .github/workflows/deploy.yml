@@ -1,0 +1,57 @@
+# Rebuilds the class list (data/class.json) and publishes the site.
+# Runs on every push, every 15 minutes, and whenever an "Add me" form is opened, edited or closed.
+name: Build and deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/15 * * * *"
+  issues:
+    types: [opened, edited, closed, reopened, deleted, labeled, unlabeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build the class list
+        run: node .github/scripts/build-data.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Make browsers load the new files
+        run: sed -i "s/?v=dev/?v=${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}/g" index.html
+
+      - name: Collect the site
+        run: |
+          mkdir _site
+          cp -r index.html app.js style.css config.js data _site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,15 @@
+name: Add me to the Class Code Showcase
+description: Pick which of your projects show on the site.
+title: "Add me"
+labels: ["showcase"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Just click **Create** below. You'll show up on the site right away.
+        To change your picks later, use **Add me** on the site again. Your newest one counts.
+  - type: textarea
+    id: repos
+    attributes:
+      label: Projects to show
+      description: One repo name per line. Only your own public repos show. Leave empty to show all your public Java repos.
