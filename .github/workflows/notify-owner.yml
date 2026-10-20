@@ -1,5 +1,5 @@
 # When the first comment on a project starts its discussion, @mention the project's owner so GitHub emails
-# them about it and about every later comment in that thread. Only for people who opted in to the showcase.
+# them about it and about every later comment in that thread. Only for people who ticked "Email me" on Add me.
 # For a thread that started before this workflow existed: Actions > this workflow > Run workflow, with its number.
 name: Tell the owner about comments
 
@@ -37,12 +37,14 @@ jobs:
             const [, owner, repo] = m;
             const site = "https://" + context.repo.owner.toLowerCase() + ".github.io/" + context.repo.repo + "/";
             const data = await fetch(site + "data/class.json").then((r) => r.json()).catch(() => null);
-            const optedIn = data && data.people.some((p) => p.login.toLowerCase() === owner.toLowerCase());
-            if (!optedIn) return core.info(owner + " isn't on the showcase; not mentioning them.");
+            const person = data && data.people.find((p) => p.login.toLowerCase() === owner.toLowerCase());
+            if (!person || !person.notify) return core.info(owner + " didn't ask for comment emails; not mentioning them.");
             const link = site + "#/" + owner + "/" + repo;
             await github.graphql(
               `mutation($id: ID!, $body: String!) { addDiscussionComment(input: { discussionId: $id, body: $body }) { comment { id } } }`,
               { id: d.node_id, body: `👋 @${owner}, someone left feedback on your project **${repo}**. ` +
-                `You'll get an email when anyone comments here. [See it on the showcase](${link})` }
+                `You asked for emails about comments, so GitHub will tell you about new ones here. ` +
+                `[See it on the showcase](${link}). To stop emails from this thread, click Unsubscribe on this page; ` +
+                `to stop them for new threads, untick "Email me" on Add me.` }
             );
             core.info("Mentioned " + owner);

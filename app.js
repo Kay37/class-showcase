@@ -372,7 +372,7 @@
       const live = picks.find((p) => p.login.toLowerCase() === mine.login.toLowerCase());
       if (!live || live.at < mine.at) {
         picks = picks.filter((p) => p !== live);
-        if (!mine.removed) picks.push({ login: mine.login, repos: mine.repos, at: mine.at });
+        if (!mine.removed) picks.push({ login: mine.login, repos: mine.repos, notify: mine.notify, at: mine.at });
       }
     }
     const people = [];
@@ -381,7 +381,7 @@
       const wanted = (r) => (set ? set.has(r.name.toLowerCase()) : r.language === "Java");
       const known = findPreloaded(d, p.login);
       if (known) {
-        people.push({ login: known.login, picked: Boolean(set), repos: known.repos.filter(wanted) });
+        people.push({ login: known.login, picked: Boolean(set), notify: Boolean(p.notify), repos: known.repos.filter(wanted) });
         continue;
       }
       const built = d.people.find((x) => x.login.toLowerCase() === p.login.toLowerCase());
@@ -762,7 +762,7 @@
         if (method === "DELETE") {
           saveMine({ login: session.login, removed: true, at: new Date().toISOString() });
         } else {
-          saveMine({ login: session.login, repos: answer.repos, at: answer.at });
+          saveMine({ login: session.login, repos: answer.repos, notify: answer.notify, at: answer.at });
           justAdded = session.login;
         }
         location.hash = "#/";
@@ -772,7 +772,8 @@
       }
     };
     renderPicker(results, session.login, loaded.repos, loaded.showing, {
-      save: (names, status) => send("PUT", { repos: names }, status),
+      notify: loaded.notify,
+      save: (names, status, notify) => send("PUT", { repos: names, notify }, status),
       remove: loaded.showing ? (status) => send("DELETE", null, status) : null
     });
   }
@@ -794,12 +795,14 @@
       repos = repos.filter((r) => !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase());
     }
     let showing = null;
+    let notify = false;
     if (d) {
       const live = await withLivePicks(d, true);
       const hit = live.people.find((p) => p.login.toLowerCase() === login.toLowerCase());
       if (hit) showing = new Set(hit.repos.map((r) => r.name.toLowerCase()));
+      if (hit) notify = Boolean(hit.notify);
     }
-    return { repos, showing };
+    return { repos, showing, notify };
   }
 
   // The backup way: type a username, then confirm with a GitHub form in a new tab.
@@ -880,11 +883,20 @@
 
     let go;
     let after;
+    let emails = null;
     if (actions) {
+      emails = el("label", "check emails");
+      const optIn = el("input");
+      optIn.type = "checkbox";
+      optIn.checked = Boolean(actions.notify);
+      const words = el("span");
+      words.append(el("strong", null, "Email me when someone comments on my projects."),
+        el("span", "muted", " Off unless you tick it. GitHub sends these to the email on your GitHub account; this site never sees it."));
+      emails.append(optIn, words);
       go = el("button", "btn primary big", showing ? "Save changes" : "Save and show my projects");
       go.type = "button";
       go.addEventListener("click", () => {
-        if (checked().length) actions.save(checked(), status);
+        if (checked().length) actions.save(checked(), status, optIn.checked);
       });
       after = el("div", "after-row");
       after.append(el("span", "muted", "You can come back and change this any time."));
@@ -908,7 +920,8 @@
       after = el("ol", "after");
       const s1 = el("li");
       s1.append("On GitHub, click ", el("strong", null, "Create"), ".");
-      after.append(s1, el("li", null, "Come back to this tab. It takes you to the gallery with your projects."),
+      after.append(s1, el("li", null, "Want emails about comments on your projects? Tick \"Email me\" on that form. It's off unless you do."),
+        el("li", null, "Come back to this tab. It takes you to the gallery with your projects."),
         el("li", null, "Want to change them later? Do this again. Your newest one counts."));
     }
 
@@ -923,7 +936,7 @@
     }
     list.addEventListener("change", update);
     update();
-    box.replaceChildren(el("h2", null, "Pick your projects"), tools, list, go, status, after);
+    box.replaceChildren(el("h2", null, "Pick your projects"), tools, list, ...(emails ? [emails] : []), go, status, after);
   }
 
   // Check GitHub for their new form when they come back to this tab (and on a button), not on a timer,

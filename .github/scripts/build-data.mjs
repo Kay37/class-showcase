@@ -202,6 +202,10 @@ async function commentCounts() {
   return counts;
 }
 
+// Comment emails are opt-in: the site writes "<!-- notify: yes -->", the GitHub form has a ticked box.
+const wantsEmails = (body) => /<!--\s*notify:\s*yes\s*-->/i.test(String(body || "")) ||
+  /^\s*[-*]\s*\[[xX]\]\s*Email me/m.test(String(body || ""));
+
 // ---------- main ----------
 
 const picks = new Map(); // lowercase login -> { login, repos: null or Set }
@@ -211,7 +215,9 @@ for (const issue of issues) {
   // Issues the sign-in server writes are opened by the owner's token and name the person in a marker line.
   const marker = String(issue.body || "").match(/<!--\s*login:\s*([A-Za-z0-9_.-]+)\s*-->/);
   const login = marker && issue.user.login.toLowerCase() === SITE.split("/")[0].toLowerCase() ? marker[1] : issue.user.login;
-  if (!picks.has(login.toLowerCase())) picks.set(login.toLowerCase(), { login, repos: parsePicks(issue.body, login) });
+  if (!picks.has(login.toLowerCase())) {
+    picks.set(login.toLowerCase(), { login, repos: parsePicks(issue.body, login), notify: wantsEmails(issue.body) });
+  }
 }
 
 for (const u of cfg.classmates || []) {
@@ -236,7 +242,7 @@ for (const p of picks.values()) {
   preloaded.push({ login, repos: all });
   if (p.preloadOnly) continue;
   const shown = all.filter((r) => (p.repos === null ? r.language === "Java" : p.repos.has(r.name.toLowerCase())));
-  people.push({ login, picked: p.repos !== null, repos: shown });
+  people.push({ login, picked: p.repos !== null, notify: Boolean(p.notify), repos: shown });
 }
 
 const data = { generatedAt: new Date().toISOString(), people, preloaded, assignments: groupAssignments(people),
