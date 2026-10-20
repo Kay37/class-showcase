@@ -188,14 +188,13 @@
     const prefs = loadPrefs();
     const added = justAdded;
     justAdded = null;
-    if (added) prefs.view = "people"; // show them their own group, without changing their saved choice
     const open = new Set(added ? [added.toLowerCase()] : []); // which people are expanded
 
     const toolbar = el("div", "toolbar");
     const views = el("div", "segmented");
     views.setAttribute("role", "group");
     views.setAttribute("aria-label", "View");
-    for (const [key, label] of [["people", "People"], ["cards", "Cards"], ["list", "List"]]) {
+    for (const [key, label] of [["cards", "Cards"], ["list", "List"], ["compact", "Compact"]]) {
       const b = el("button", null, label);
       b.type = "button";
       b.dataset.view = key;
@@ -251,65 +250,28 @@
       const byRepo = (a, b) => (prefs.sort === "az" ? a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
         : byDate(a.pushedAt, b.pushedAt));
       views.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === prefs.view)));
-      folds.hidden = prefs.view !== "people";
       body.replaceChildren();
 
-      if (prefs.view === "people") {
-        const shown = people
-          .map((p) => ({ ...p, shown: p.repos.filter((r) => match(p.login, r)).sort(byRepo) }))
-          .filter((p) => p.shown.length)
-          .sort((a, b) => (prefs.sort === "az" ? a.login.localeCompare(b.login, undefined, { sensitivity: "base" })
-            : byDate(a.newest, b.newest)));
-        for (const p of shown) {
-          const person = el("details", "person");
-          person.dataset.login = p.login.toLowerCase();
-          person.open = Boolean(q) || open.has(p.login.toLowerCase());
-          const head = el("summary", "person-head");
-          head.append(avatar(p.login), el("h3", null, p.login),
-            el("span", "count", p.shown.length + (p.shown.length === 1 ? " project" : " projects") +
-              " · updated " + new Date(p.newest).toLocaleDateString()));
-          const cards = el("div", "cards");
-          for (const r of p.shown) cards.append(projectCard(p.login, r));
-          person.append(head, cards);
-          person.addEventListener("toggle", () => {
-            if (q) return; // searching opens everyone; don't remember that
-            if (person.open) open.add(p.login.toLowerCase());
-            else open.delete(p.login.toLowerCase());
-          });
-          body.append(person);
-        }
-      } else {
-        const items = [];
-        for (const p of people) for (const r of p.repos) if (match(p.login, r)) items.push({ login: p.login, r });
-        items.sort((a, b) => byRepo(a.r, b.r) || a.login.localeCompare(b.login));
-        if (prefs.view === "cards") {
-          const cards = el("div", "cards");
-          for (const it of items) cards.append(projectCard(it.login, it.r, true));
-          if (items.length) body.append(cards);
-        } else if (items.length) {
-          const table = el("table", "list-view");
-          const head = el("tr");
-          for (const h of ["Project", "Classmate", "Language", "Updated"]) head.append(el("th", null, h));
-          const thead = el("thead");
-          thead.append(head);
-          const tbody = el("tbody");
-          for (const it of items) {
-            const row = el("tr");
-            const name = el("td", "name");
-            const a = el("a", null, it.r.name);
-            a.href = "#/" + it.login + "/" + it.r.name;
-            name.append(a);
-            if (it.r.description) name.append(el("div", "muted", it.r.description));
-            const who = el("td", "who-cell");
-            who.append(avatar(it.login), el("span", null, it.login));
-            const lang = el("td");
-            if (it.r.language) lang.append(el("span", "lang", it.r.language));
-            row.append(name, who, lang, el("td", "muted", new Date(it.r.pushedAt).toLocaleDateString()));
-            tbody.append(row);
-          }
-          table.append(thead, tbody);
-          body.append(table);
-        }
+      const shown = people
+        .map((p) => ({ ...p, shown: p.repos.filter((r) => match(p.login, r)).sort(byRepo) }))
+        .filter((p) => p.shown.length)
+        .sort((a, b) => (prefs.sort === "az" ? a.login.localeCompare(b.login, undefined, { sensitivity: "base" })
+          : byDate(a.newest, b.newest)));
+      for (const p of shown) {
+        const person = el("details", "person");
+        person.dataset.login = p.login.toLowerCase();
+        person.open = Boolean(q) || open.has(p.login.toLowerCase());
+        const head = el("summary", "person-head");
+        head.append(avatar(p.login), el("h3", null, p.login),
+          el("span", "count", p.shown.length + (p.shown.length === 1 ? " project" : " projects") +
+            " · updated " + new Date(p.newest).toLocaleDateString()));
+        person.append(head, projectsView(p.login, p.shown, prefs.view));
+        person.addEventListener("toggle", () => {
+          if (q) return; // searching opens everyone; don't remember that
+          if (person.open) open.add(p.login.toLowerCase());
+          else open.delete(p.login.toLowerCase());
+        });
+        body.append(person);
       }
       if (!body.firstChild) body.append(el("p", "empty", "Nothing matches “" + search.value.trim() + "”."));
     }
@@ -330,11 +292,49 @@
     }
   }
 
+  function projectsView(login, repos, view) {
+    if (view === "list") {
+      const table = el("table", "list-view");
+      const head = el("tr");
+      for (const h of ["Project", "Language", "Updated"]) head.append(el("th", null, h));
+      const thead = el("thead");
+      thead.append(head);
+      const tbody = el("tbody");
+      for (const r of repos) {
+        const row = el("tr");
+        const name = el("td", "name");
+        const a = el("a", null, r.name);
+        a.href = "#/" + login + "/" + r.name;
+        name.append(a);
+        if (r.description) name.append(el("div", "muted", r.description));
+        const lang = el("td");
+        if (r.language) lang.append(el("span", "lang", r.language));
+        row.append(name, lang, el("td", "muted", new Date(r.pushedAt).toLocaleDateString()));
+        tbody.append(row);
+      }
+      table.append(thead, tbody);
+      return table;
+    }
+    if (view === "compact") {
+      const tags = el("div", "tags");
+      for (const r of repos) {
+        const a = el("a", "tag", r.name);
+        a.href = "#/" + login + "/" + r.name;
+        a.title = (r.description ? r.description + " · " : "") + "Updated " + new Date(r.pushedAt).toLocaleDateString();
+        tags.append(a);
+      }
+      return tags;
+    }
+    const cards = el("div", "cards");
+    for (const r of repos) cards.append(projectCard(login, r));
+    return cards;
+  }
+
   function loadPrefs() {
     let p = {};
     try { p = JSON.parse(localStorage.getItem("showcase-view")) || {}; } catch (e) { /* defaults */ }
     return {
-      view: ["people", "cards", "list"].includes(p.view) ? p.view : "people",
+      view: ["cards", "list", "compact"].includes(p.view) ? p.view : "cards",
       sort: ["new", "old", "az"].includes(p.sort) ? p.sort : "new"
     };
   }

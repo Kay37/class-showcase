@@ -291,3 +291,10 @@ details.person.mine { outline: 2px solid var(--accent); outline-offset: 2px; }
   .list-view th:nth-child(3), .list-view td:nth-child(3) { display: none; }
   .toolbar .search { flex-basis: 100%; }
 }
+details.person > .list-view, details.person > .tags { margin-bottom: 14px; }
+.tags { display: flex; flex-wrap: wrap; gap: 8px; }
+.tag {
+  padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg);
+  color: var(--accent); font-weight: 600; font-size: 14px; text-decoration: none;
+}
+.tag:hover { border-color: var(--accent); background: var(--accent-soft); }
