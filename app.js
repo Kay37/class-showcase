@@ -380,22 +380,20 @@
       const set = p.repos ? new Set(p.repos.map((n) => n.toLowerCase())) : null;
       const wanted = (r) => (set ? set.has(r.name.toLowerCase()) : r.language === "Java");
       const known = findPreloaded(d, p.login);
-      if (known) {
+      const isNew = (n) => !known.repos.some((r) => r.name.toLowerCase() === n);
+      if (known && !(set && [...set].some(isNew))) {
         people.push({ login: known.login, picked: Boolean(set), notify: Boolean(p.notify), repos: known.repos.filter(wanted) });
         continue;
       }
+      // Someone new, or a repo they made after the last rebuild: ask for their repos now.
+      // Repos we already know keep their file lists; new ones get theirs when opened.
       const built = d.people.find((x) => x.login.toLowerCase() === p.login.toLowerCase());
       try {
-        const repos = await getJson("https://api.github.com/users/" + p.login + "/repos?type=owner&per_page=100&sort=pushed");
-        people.push({
-          login: p.login,
-          picked: Boolean(set),
-          repos: repos
-            .filter((r) => !r.private && !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase())
-            .map((r) => ({ name: r.name, description: r.description || "", language: r.language || "",
-              pushedAt: r.pushed_at, files: null, main: null }))
-            .filter(wanted)
-        });
+        const byName = new Map((known ? known.repos : []).map((r) => [r.name.toLowerCase(), r]));
+        const repos = (await liveRepos(p.login))
+          .map((r) => byName.get(r.name.toLowerCase()) || { ...r, files: null, main: null })
+          .filter(wanted);
+        people.push({ login: known ? known.login : p.login, picked: Boolean(set), notify: Boolean(p.notify), repos });
       } catch (err) {
         if (built) people.push(built);
       }
@@ -737,11 +735,16 @@
     results.append(el("p", "muted", "Loading your projects…"));
     page.append(who, results);
 
-    const loaded = await loadRepos(session.login);
+    const loaded = await loadRepos(session.login, page.dataset.refresh === "1");
     if (loaded.error) {
       results.replaceChildren(el("p", "error", loaded.error));
       return;
     }
+    const refresh = () => {
+      page.replaceChildren(...[...page.children].filter((c) => c !== who && c !== results));
+      page.dataset.refresh = "1";
+      signedInFlow(page, session);
+    };
     const send = async (method, body, status) => {
       status.className = "status";
       status.textContent = method === "DELETE" ? "Taking your projects down…" : "Saving…";
@@ -775,25 +778,43 @@
       notify: loaded.notify,
       save: (names, status, notify) => send("PUT", { repos: names, notify }, status),
       remove: loaded.showing ? (status) => send("DELETE", null, status) : null
-    });
+    }, refresh);
   }
 
   // Their repos (preloaded when we know them) and what shows on the site today.
-  async function loadRepos(login) {
-    let d = null;
-    try { d = await loadData(); } catch (err) { /* no list yet: ask GitHub */ }
-    const known = d && findPreloaded(d, login);
-    let repos;
-    if (known) {
-      repos = known.repos.map((r) => ({ name: r.name, language: r.language, pushed_at: r.pushedAt }));
-    } else {
-      try {
-        repos = await getJson("https://api.github.com/users/" + login + "/repos?type=owner&per_page=100&sort=pushed");
-      } catch (err) {
-        return { error: err.message === "not-found" ? "No GitHub user named " + login + "." : errorText(err) };
+  // Someone's public repos right now (not forks), newest first: { name, description, language, pushedAt }.
+  // Asks the sign-in server (no GitHub limit for visitors), else GitHub directly. skipCache gets brand-new repos.
+  async function liveRepos(login, skipCache) {
+    if (cfg.api) {
+      const url = cfg.api + "/api/repos?user=" + encodeURIComponent(login);
+      const cached = skipCache ? null : cacheGet(url);
+      if (cached) return cached;
+      let res = null;
+      try { res = await fetch(skipCache ? url + "&t=" + Date.now() : url); } catch (err) { /* try GitHub below */ }
+      if (res && (res.status === 404 || res.status === 400)) throw new Error("not-found");
+      if (res && res.ok) {
+        const repos = (await res.json()).repos;
+        cacheSet(url, repos);
+        return repos;
       }
-      repos = repos.filter((r) => !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase());
     }
+    const list = await getJson("https://api.github.com/users/" + login + "/repos?type=owner&per_page=100&sort=pushed", skipCache);
+    return list.filter((r) => !r.private && !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase())
+      .map((r) => ({ name: r.name, description: r.description || "", language: r.language || "", pushedAt: r.pushed_at }));
+  }
+
+  async function loadRepos(login, skipCache) {
+    let d = null;
+    try { d = await loadData(); } catch (err) { /* no list yet */ }
+    const known = d && findPreloaded(d, login);
+    let list;
+    try {
+      list = await liveRepos(login, skipCache);
+    } catch (err) {
+      if (!known) return { error: err.message === "not-found" ? "No GitHub user named " + login + "." : errorText(err) };
+      list = known.repos; // GitHub is busy: the list from the last rebuild is close enough
+    }
+    const repos = list.map((r) => ({ name: r.name, language: r.language, pushed_at: r.pushedAt }));
     let showing = null;
     let notify = false;
     if (d) {
@@ -841,15 +862,22 @@
       }
       try { localStorage.setItem("showcase-username", login); } catch (err) { /* fine */ }
       results.replaceChildren(el("p", "muted", "Looking up " + login + "…"));
-      const loaded = await loadRepos(login);
+      const fresh = form.dataset.refresh === "1";
+      form.dataset.refresh = "";
+      const loaded = await loadRepos(login, fresh);
+      const refresh = () => {
+        form.dataset.refresh = "1";
+        form.requestSubmit();
+      };
       if (loaded.error) results.replaceChildren(el("p", "error", loaded.error));
-      else renderPicker(results, login, loaded.repos, loaded.showing, null);
+      else renderPicker(results, login, loaded.repos, loaded.showing, null, refresh);
     });
     if (input.value) form.requestSubmit();
   }
 
   // actions: { save(names, status), remove(status) } when signed in; null for the GitHub-form way.
-  function renderPicker(box, login, repos, showing, actions) {
+  // onRefresh(): reload the list from GitHub (for a repo made a moment ago).
+  function renderPicker(box, login, repos, showing, actions, onRefresh) {
     if (repos.length === 0) {
       box.replaceChildren(el("p", "empty", login + " has no public repos yet. Push a project from IntelliJ, then come back."));
       return;
@@ -878,6 +906,13 @@
     all.onclick = () => { list.querySelectorAll("input").forEach((c) => { c.checked = true; }); update(); };
     none.onclick = () => { list.querySelectorAll("input").forEach((c) => { c.checked = false; }); update(); };
     tools.append(count, all, none);
+    if (onRefresh) {
+      const again = el("button", "link", "\u21BB Refresh list");
+      again.type = "button";
+      again.title = "Made a new repo? This gets your latest list from GitHub.";
+      again.addEventListener("click", onRefresh);
+      tools.append(again);
+    }
     const status = el("div", "status");
     const checked = () => [...list.querySelectorAll("input:checked")].map((c) => c.value);
 
