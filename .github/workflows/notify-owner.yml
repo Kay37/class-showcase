@@ -1,10 +1,16 @@
 # When the first comment on a project starts its discussion, @mention the project's owner so GitHub emails
 # them about it and about every later comment in that thread. Only for people who opted in to the showcase.
+# For a thread that started before this workflow existed: Actions > this workflow > Run workflow, with its number.
 name: Tell the owner about comments
 
 on:
   discussion:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      discussion:
+        description: "Discussion number of an existing project thread"
+        required: true
 
 permissions:
   discussions: write
@@ -14,9 +20,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v7
+        env:
+          NUMBER: ${{ github.event.inputs.discussion }}
         with:
           script: |
-            const d = context.payload.discussion;
+            let d = context.payload.discussion;
+            if (!d) {
+              const r = await github.graphql(
+                `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { discussion(number: $n) { id title } } }`,
+                { owner: context.repo.owner, name: context.repo.repo, n: Number(process.env.NUMBER) }
+              );
+              d = { node_id: r.repository.discussion.id, title: r.repository.discussion.title };
+            }
             const m = d.title.match(/^([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)$/);
             if (!m) return core.info("Not a project thread: " + d.title);
             const [, owner, repo] = m;
