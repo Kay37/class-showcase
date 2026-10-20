@@ -780,11 +780,17 @@
     names.append(el("div", "owner", owner), el("h1", null, repo));
     who.append(avatar(owner), names);
     const links = el("div", "links");
+    const runBtn = el("button", "run-open", "▶ Run");
+    runBtn.type = "button";
     links.append(
+      runBtn,
       extLink("https://github.com/" + owner + "/" + repo, "View on GitHub"),
       extLink("https://github.dev/" + owner + "/" + repo, "Open in web editor")
     );
     bar.append(backLink(), who, links);
+    const runBox = el("section", "run");
+    runBox.hidden = true;
+    runBtn.addEventListener("click", () => openRun(runBox));
 
     const layout = el("div", "layout");
     const side = el("nav", "files");
@@ -797,7 +803,7 @@
 
     const comments = el("section", "comments");
     comments.id = "comments";
-    app.append(bar, layout, comments);
+    app.append(bar, runBox, layout, comments);
     renderComments(owner, repo, comments);
   }
 
@@ -851,6 +857,244 @@
     pre.append(code);
     wrap.append(gutter, pre);
     return wrap;
+  }
+
+  // ---------- run (Java in the browser, with CheerpJ) ----------
+  // The first Run loads CheerpJ (a Java 17 runtime for browsers) from its CDN, and javac17.jar from run/.
+  // run/RunWithInput.java compiles the files and runs main. Its native methods are the functions in
+  // `natives`: output comes to the terminal box, and System.in asks the box for one line at a time.
+
+  const CHEERPJ = "https://cjrtnc.leaningtech.com/4.3/loader.js";
+  const RUN_DIR = "/app" + new URL("run/", location.href).pathname; // CheerpJ sees this site under /app/
+  const RUN_CP = RUN_DIR + "runwithinput.jar:" + RUN_DIR + "javac17.jar";
+  const WORK = "/files/showcase"; // CheerpJ's saved folder; RunWithInput clears it on every compile
+  const MAX_OUTPUT = 200000;
+  let java = null; // promise: CheerpJ is ready
+  let term = null; // the terminal of the program that's running (or ran last)
+  let busy = false;
+
+  const natives = {
+    async Java_RunWithInput_readLine() { return term ? term.ask() : null; },
+    async Java_RunWithInput_write(lib, text, err) { if (term) term.print(String(text), err === 1); },
+    async Java_RunWithInput_done(lib, code) { if (term) term.code = code; }
+  };
+
+  function loadJava() {
+    if (!java) {
+      java = new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = CHEERPJ;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error("Couldn't load Java (CheerpJ). Check your internet connection and try again."));
+        document.head.append(s);
+      }).then(() => cheerpjInit({ version: 17, status: "none", natives }));
+      java.catch(() => { java = null; });
+    }
+    return java;
+  }
+
+  // The files to compile: everything under src/main/java, or (plain IntelliJ projects) every .java outside tests.
+  function runFiles(files) {
+    const all = files.filter((f) => f.endsWith(".java"));
+    const maven = all.filter((f) => f.startsWith("src/main/java/"));
+    return maven.length ? maven : all.filter((f) => !/(^|\/)test\//.test(f));
+  }
+
+  // Classes with a main method, named from the file and its package line.
+  function findMains(paths, texts) {
+    const mains = [];
+    paths.forEach((p, i) => {
+      const code = texts[i].replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+      if (!/\bstatic\s+(final\s+)?void\s+main\s*\(/.test(code)) return;
+      const pkg = code.match(/^\s*package\s+([\w.]+)\s*;/m);
+      const cls = p.split("/").pop().replace(/\.java$/, "");
+      mains.push({ path: p, name: (pkg ? pkg[1] + "." : "") + cls });
+    });
+    return mains;
+  }
+
+  async function openRun(box) {
+    if (!box.hidden) {
+      box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      return;
+    }
+    box.hidden = false;
+    const proj = current;
+    const paths = runFiles(proj.files);
+    box.replaceChildren(el("p", "muted pad", "Getting the Java files…"));
+    let texts;
+    try {
+      texts = await Promise.all(paths.map((p) => getFile(proj.owner, proj.repo, p)));
+    } catch (err) {
+      box.replaceChildren(el("p", "error pad", errorText(err)));
+      box.hidden = true;
+      return;
+    }
+    if (current !== proj) return;
+    const mains = findMains(paths, texts);
+    if (!paths.length || !mains.length) {
+      box.replaceChildren(el("p", "muted pad", paths.length
+        ? "No file here has a main method, so there's nothing to run."
+        : "This project has no Java files to run."));
+      return;
+    }
+
+    const bar = el("div", "run-bar");
+    const pick = el("select");
+    pick.setAttribute("aria-label", "Class to run");
+    for (const m of mains) {
+      const o = el("option", null, m.name);
+      o.value = m.name;
+      o.title = m.path;
+      pick.append(o);
+    }
+    const open = document.querySelector(".files a.active");
+    const start = mains.find((m) => open && m.path === open.dataset.path) || mains.find((m) => m.path === proj.main) || mains[0];
+    pick.value = start.name;
+    pick.hidden = mains.length === 1;
+    const go = el("button", null, "▶ Run");
+    go.type = "button";
+    const stop = el("button", "btn", "■ Stop");
+    stop.type = "button";
+    stop.title = "Stops the program by reloading the page";
+    const status = el("span", "run-status muted");
+    status.setAttribute("aria-live", "polite");
+    bar.append(pick, go, stop, status);
+
+    const screen = el("pre", "term");
+    screen.setAttribute("role", "log");
+    screen.tabIndex = 0;
+    const form = el("form", "term-input");
+    const prompt = el("span", "term-prompt", "›");
+    const input = el("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.setAttribute("aria-label", "Input for the program");
+    const send = el("button", null, "Send");
+    send.type = "submit";
+    const eof = el("button", "btn small", "Send end of input");
+    eof.type = "button";
+    eof.title = "For programs that read until the input runs out";
+    form.append(prompt, input, send, eof);
+    const credit = el("p", "run-credit muted");
+    const cj = extLink("https://cheerpj.com/", "CheerpJ");
+    cj.className = "";
+    credit.append("Runs in your browser. Run button powered by ", cj, ". The first run downloads about 15 MB.");
+    box.replaceChildren(bar, screen, form, credit);
+
+    const t = { screen, form, input, status, count: 0, strip: WORK + "/src/", code: null, waiting: null, color: "" };
+    t.print = (text, err) => {
+      if (t.count > MAX_OUTPUT) return;
+      text = text.split(t.strip).join("");
+      t.count += text.length;
+      if (t.count > MAX_OUTPUT) text += "\n… more output was cut off here …\n";
+      const near = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 40;
+      // Color codes like "\u001b[32m" (green) work as in IntelliJ's Run window, and "\u001b[2J" clears.
+      text.split(/(\u001b\[[\d;]*[A-Za-z])/).forEach((part, i) => {
+        if (i % 2) {
+          const codes = part.slice(2, -1).split(";").map(Number);
+          if (part.endsWith("J")) screen.replaceChildren();
+          if (!part.endsWith("m")) return;
+          for (const c of codes) {
+            if (c === 0) t.color = "";
+            else if ((c >= 30 && c <= 37) || (c >= 90 && c <= 97)) t.color = " a" + c;
+            else if (c === 39) t.color = "";
+          }
+          return;
+        }
+        if (!part) return;
+        const kind = (err ? "err" : "out") + t.color;
+        const last = screen.lastChild;
+        if (last && last.className === kind) last.textContent += part;
+        else screen.append(el("span", kind, part));
+      });
+      if (near) screen.scrollTop = screen.scrollHeight;
+    };
+    t.ask = () => new Promise((resolve) => {
+      t.waiting = resolve;
+      setInputOn(t, true);
+      input.focus({ preventScroll: true });
+    });
+    t.answer = (line) => {
+      const resolve = t.waiting;
+      if (!resolve) return;
+      t.waiting = null;
+      if (line === null) screen.append(el("span", "muted", "(end of input)\n"));
+      else screen.append(el("span", "typed", line + "\n"));
+      screen.scrollTop = screen.scrollHeight;
+      setInputOn(t, false);
+      resolve(line);
+    };
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const line = input.value;
+      input.value = "";
+      t.answer(line);
+    });
+    eof.addEventListener("click", () => t.answer(null));
+    stop.addEventListener("click", () => { if (busy) location.reload(); });
+    go.addEventListener("click", () => runProgram(t, proj, paths, texts, pick.value, go, stop));
+    setInputOn(t, false);
+    stop.disabled = true;
+    form.hidden = true;
+    if (busy) {
+      status.textContent = "Another program is still running. Stop it first.";
+      stop.disabled = false;
+    } else if (mains.length === 1) {
+      runProgram(t, proj, paths, texts, pick.value, go, stop);
+    } else {
+      status.textContent = "This project has " + mains.length + " classes with main. Pick one, then click Run.";
+    }
+  }
+
+  function setInputOn(t, on) {
+    t.input.disabled = !on;
+    t.form.querySelectorAll("button").forEach((b) => { b.disabled = !on; });
+    t.form.classList.toggle("asking", on);
+    t.input.placeholder = on ? "Type here, then press Enter" : "The program isn't asking for input";
+  }
+
+  async function runProgram(t, proj, paths, texts, mainClass, go, stop) {
+    if (busy) return;
+    busy = true;
+    term = t;
+    go.disabled = true;
+    stop.disabled = false;
+    t.screen.replaceChildren();
+    t.count = 0;
+    t.form.hidden = false;
+    const started = performance.now();
+    const secs = () => ((performance.now() - started) / 1000).toFixed(1) + " s";
+    const call = async (args) => {
+      t.code = null;
+      const r = await cheerpjRunMain("RunWithInput", RUN_CP, ...args);
+      return t.code != null ? t.code : r;
+    };
+    try {
+      t.status.textContent = java ? "Starting…" : "Loading Java. The first run takes 10 seconds or more…";
+      await loadJava();
+      t.status.textContent = "Compiling " + paths.length + (paths.length === 1 ? " file…" : " files…");
+      const enc = new TextEncoder();
+      texts.forEach((text, i) => cheerpOSAddStringFile("/str/src" + i + ".java", enc.encode(text)));
+      const compiled = await call(["compile", WORK, ...paths]);
+      if (compiled !== 0) {
+        t.status.textContent = "It didn't compile. The errors are above.";
+        return;
+      }
+      t.status.textContent = "Running " + mainClass + "…";
+      const code = await call(["run", WORK, mainClass]);
+      t.status.textContent = (code === 0 ? "Finished" : "Stopped with exit code " + code) + " (" + secs() + ").";
+    } catch (err) {
+      t.print("\n" + (err && err.message ? err.message : String(err)) + "\n", true);
+      t.status.textContent = "Something went wrong.";
+    } finally {
+      busy = false;
+      go.disabled = false;
+      stop.disabled = true;
+      setInputOn(t, false);
+      if (t.waiting) t.answer(null);
+    }
   }
 
   // ---------- file tree ----------

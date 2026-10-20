@@ -45,7 +45,7 @@ jobs:
       - name: Collect the site
         run: |
           mkdir _site
-          cp -r index.html app.js style.css config.js data _site/
+          cp -r index.html app.js style.css config.js data run _site/
 
       - uses: actions/configure-pages@v5
 
