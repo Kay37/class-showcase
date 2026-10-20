@@ -107,8 +107,8 @@
   }
 
   // File contents come from raw.githubusercontent.com, which doesn't count toward the limit.
-  async function getFile(owner, repo, path) {
-    const url = "https://raw.githubusercontent.com/" + owner + "/" + repo + "/HEAD/" +
+  async function getFile(owner, repo, path, ref) {
+    const url = "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + (ref || "HEAD") + "/" +
       path.split("/").map(encodeURIComponent).join("/");
     if (!fileCache.has(url)) {
       fileCache.set(url, fetch(url).then((r) => {
@@ -600,11 +600,35 @@
     pane.append(bar, runBox, body);
     run.addEventListener("click", () => {
       const v = versions[Number(who.value)];
-      openRun(runBox, { owner: v.login, repo: v.repo.name, files: v.repo.files, main: v.repo.main });
+      openRun(runBox, { owner: v.login, repo: v.repo.name, files: v.repo.files, main: v.repo.main, ref: v.ref });
     });
 
+    function fillFiles(v) {
+      const keep = file.value;
+      file.replaceChildren();
+      const files = [...v.repo.files].sort((x, y) => (y.endsWith(".java") - x.endsWith(".java")) || x.localeCompare(y));
+      for (const f of files) {
+        const o = el("option", null, f.split("/").pop());
+        o.value = f;
+        o.title = f;
+        file.append(o);
+      }
+      if (keep && files.includes(keep)) file.value = keep;
+    }
     function pickPerson() {
       const v = versions[Number(who.value)];
+      if (!v.checked) {
+        v.checked = true;
+        latestTree(v.login, v.repo.name).then((fresh) => {
+          if (!fresh) return;
+          v.ref = fresh.sha;
+          v.repo = { ...v.repo, files: fresh.files };
+          if (versions[Number(who.value)] === v) {
+            fillFiles(v);
+            showFile();
+          }
+        });
+      }
       open.href = "#/" + v.login + "/" + v.repo.name;
       if (!runBox.hidden && !busy) {
         runBox.hidden = true;
@@ -630,7 +654,7 @@
       }
       body.replaceChildren(el("p", "muted pad", "Loading…"));
       try {
-        const text = await getFile(v.login, v.repo.name, path);
+        const text = await getFile(v.login, v.repo.name, path, v.ref);
         if (versions[Number(who.value)] === v && file.value === path) {
           const block = codeBlock(text, path);
           body.replaceChildren(block);
@@ -1019,10 +1043,15 @@
       app.append(el("p", "muted pad", "Loading " + owner + "/" + repo + "…"));
       let files;
       let main = null;
+      let ref = null;
       const hit = await loadData().then((d) => findRepo(d, owner, repo)).catch(() => null);
+      const fresh = hit && hit.repo.files ? null : await latestTree(owner, repo);
       if (hit && hit.repo.files) {
         files = hit.repo.files;
         main = hit.repo.main;
+      } else if (fresh) {
+        files = fresh.files;
+        ref = fresh.sha;
       } else {
         try {
           const tree = await getJson("https://api.github.com/repos/" + owner + "/" + repo + "/git/trees/HEAD?recursive=1");
@@ -1035,11 +1064,53 @@
           return;
         }
       }
-      current = { owner, repo, files, main };
+      current = { owner, repo, files, main, ref };
       renderShell(owner, repo, files);
+      if (!ref) refreshFiles(current);
     }
     if (!path) path = current.main || await pickStartFile(owner, repo, current.files);
     openFile(path, lineRange(query));
+  }
+
+  // The newest commit of a repo and its files, from the sign-in server; null if we can't tell.
+  async function latestTree(owner, repo) {
+    if (!cfg.api) return null;
+    try {
+      const res = await fetch(cfg.api + "/api/tree?repo=" + encodeURIComponent(owner + "/" + repo));
+      const body = res.ok ? await res.json() : null;
+      return body && body.sha ? body : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // The saved file list can be up to 15 minutes old. Check the newest commit: if files were added or removed,
+  // redraw the tree; if the open file changed, show the new version.
+  async function refreshFiles(proj) {
+    const fresh = await latestTree(proj.owner, proj.repo);
+    if (!fresh || current !== proj) return;
+    const added = fresh.files.filter((f) => !proj.files.includes(f));
+    const removed = proj.files.filter((f) => !fresh.files.includes(f));
+    proj.ref = fresh.sha;
+    proj.files = fresh.files;
+    if (added.length || removed.length) {
+      const side = document.querySelector("nav.files");
+      if (side) {
+        side.replaceChildren(el("div", "files-title", fresh.files.length + " files"), renderTree(buildTree(fresh.files)));
+        for (const f of added) {
+          const a = side.querySelector('a[data-path="' + CSS.escape(f) + '"]');
+          if (a) a.append(el("span", "new-badge", "new"));
+        }
+        const open = side.querySelector('a[data-path="' + CSS.escape(proj.openPath || "") + '"]');
+        if (open) open.classList.add("active");
+      }
+      toast(added.length ? "New since the last update: " + added.map((f) => f.split("/").pop()).join(", ")
+        : "The file list is up to date now.");
+    }
+    if (proj.openPath && fresh.files.includes(proj.openPath)) {
+      const text = await getFile(proj.owner, proj.repo, proj.openPath, proj.ref).catch(() => null);
+      if (text !== null && text !== proj.openText && current === proj) openFile(proj.openPath, proj.openLines);
+    }
   }
 
   // "L=12" or "L=12-15" from a route's query.
@@ -1096,7 +1167,7 @@
   // Open the file with main() first, for repos the class list doesn't cover.
   async function pickStartFile(owner, repo, files) {
     const java = files.filter((f) => f.endsWith(".java")).slice(0, 15);
-    const texts = await Promise.all(java.map((f) => getFile(owner, repo, f).catch(() => "")));
+    const texts = await Promise.all(java.map((f) => getFile(owner, repo, f, current && current.ref).catch(() => "")));
     const withMain = java.find((f, i) => /static\s+void\s+main\s*\(/.test(texts[i]));
     return withMain || java[0] || files.find((f) => /readme/i.test(f)) || files[0] || "";
   }
@@ -1119,12 +1190,15 @@
     viewer.replaceChildren(head, el("p", "muted pad", "Loading…"));
     let text;
     try {
-      text = await getFile(current.owner, current.repo, path);
+      text = await getFile(current.owner, current.repo, path, current.ref);
     } catch (err) {
       viewer.replaceChildren(head, el("p", "error pad", errorText(err)));
       return;
     }
     const proj = current;
+    proj.openPath = path;
+    proj.openText = text;
+    proj.openLines = lines;
 
     // Click a line number for a link to that line; shift-click for a range.
     let picked = lines;
@@ -1427,7 +1501,7 @@
     box.replaceChildren(el("p", "muted pad", "Getting the Java files…"));
     let texts;
     try {
-      texts = await Promise.all(paths.map((p) => getFile(proj.owner, proj.repo, p)));
+      texts = await Promise.all(paths.map((p) => getFile(proj.owner, proj.repo, p, proj.ref)));
     } catch (err) {
       box.replaceChildren(el("p", "error pad", errorText(err)));
       box.hidden = true;
