@@ -6,6 +6,10 @@ window.SHOWCASE = {
   // Only people who use "Add me" show up, with only the repos they pick.
   siteRepo: "Kay37/class-showcase",
 
+  // The small sign-in server (class-showcase-api on Vercel): "Sign in with GitHub" and instant saves.
+  // Leave it empty to use only the GitHub-form way.
+  api: "https://class-showcase-api.vercel.app",
+
   // Classmates' GitHub usernames. Their public repos are preloaded so "Add me" is instant for them,
   // but nothing of theirs is shown until they use "Add me".
   classmates: [

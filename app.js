@@ -42,9 +42,10 @@
   // ---------- routing ----------
 
   function route() {
-    const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+    const [path, query] = location.hash.replace(/^#\/?/, "").split("?");
+    const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
     if (parts.length === 1 && parts[0] === "add-me") {
-      showAddMe();
+      showAddMe(query);
     } else if (parts.length === 2 && parts[0] === "~compare") {
       showCompare(parts[1]);
     } else if (parts.length >= 2 && NAME.test(parts[0]) && NAME.test(parts[1])) {
@@ -157,7 +158,7 @@
 
     let d;
     try {
-      d = await withFreshPicks(await loadData(), Boolean(justAdded));
+      d = await withLivePicks(await loadData(), Boolean(justAdded));
     } catch (err) {
       list.replaceChildren(el("p", "error", errorText(err)));
       return;
@@ -213,6 +214,55 @@
     }
   }
 
+  // Who shows right now: the sign-in server's list (cfg.api), plus what this browser just saved.
+  // Repos come from the preloaded list, so this costs no GitHub calls for classmates we know.
+  // Without the server, fall back to reading new "Add me" forms straight from GitHub.
+  async function withLivePicks(d, skipCache) {
+    let picks = null;
+    if (cfg.api) {
+      try {
+        picks = (await getJson(cfg.api + "/api/picks", skipCache)).picks;
+      } catch (err) {
+        picks = null;
+      }
+    }
+    if (!picks) return withFreshPicks(d, skipCache);
+    const mine = readMine();
+    if (mine && NAME.test(mine.login || "")) {
+      const live = picks.find((p) => p.login.toLowerCase() === mine.login.toLowerCase());
+      if (!live || live.at < mine.at) {
+        picks = picks.filter((p) => p !== live);
+        if (!mine.removed) picks.push({ login: mine.login, repos: mine.repos, at: mine.at });
+      }
+    }
+    const people = [];
+    for (const p of picks) {
+      const set = p.repos ? new Set(p.repos.map((n) => n.toLowerCase())) : null;
+      const wanted = (r) => (set ? set.has(r.name.toLowerCase()) : r.language === "Java");
+      const known = findPreloaded(d, p.login);
+      if (known) {
+        people.push({ login: known.login, picked: Boolean(set), repos: known.repos.filter(wanted) });
+        continue;
+      }
+      const built = d.people.find((x) => x.login.toLowerCase() === p.login.toLowerCase());
+      try {
+        const repos = await getJson("https://api.github.com/users/" + p.login + "/repos?type=owner&per_page=100&sort=pushed");
+        people.push({
+          login: p.login,
+          picked: Boolean(set),
+          repos: repos
+            .filter((r) => !r.private && !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase())
+            .map((r) => ({ name: r.name, description: r.description || "", language: r.language || "",
+              pushedAt: r.pushed_at, files: null, main: null }))
+            .filter(wanted)
+        });
+      } catch (err) {
+        if (built) people.push(built);
+      }
+    }
+    return { ...d, people };
+  }
+
   // The class list is rebuilt a minute or two after each "Add me" form. Until then, read new forms straight
   // from GitHub so people show up right away. If GitHub is limiting us, the built list is still fine.
   async function withFreshPicks(d, skipCache) {
@@ -226,8 +276,8 @@
     const fresh = new Map();
     for (const issue of issues) {
       if (issue.pull_request || issue.updated_at <= d.generatedAt) continue;
-      const key = issue.user.login.toLowerCase();
-      if (!fresh.has(key)) fresh.set(key, { login: issue.user.login, picks: parsePicks(issue.body, issue.user.login) });
+      const login = issueLogin(issue);
+      if (!fresh.has(login.toLowerCase())) fresh.set(login.toLowerCase(), { login, picks: parsePicks(issue.body, login) });
     }
     if (fresh.size === 0) return d;
     const people = d.people.filter((p) => !fresh.has(p.login.toLowerCase()));
@@ -255,6 +305,14 @@
       }
     }
     return { ...d, people };
+  }
+
+  // Who an "Add me" issue is for: the person named in the sign-in server's marker line (only trusted on
+  // issues the site owner's token opened), otherwise the issue's author. Same rule as build-data.mjs.
+  function issueLogin(issue) {
+    const m = String(issue.body || "").match(/<!--\s*login:\s*([A-Za-z0-9_.-]+)\s*-->/);
+    if (m && issue.user.login.toLowerCase() === SITE_REPO.split("/")[0].toLowerCase()) return m[1];
+    return issue.user.login;
   }
 
   // An "Add me" form body looks like "### Projects to show\n\nrepo-one\nrepo-two". Only the author's own
@@ -370,14 +428,161 @@
 
   // ---------- add me ----------
 
-  function showAddMe() {
+  // Signed in = a session from the sign-in server (cfg.api), kept in this browser for 30 days.
+  // It only says who you are; the server checks it before saving anything.
+  function readSession() {
+    try {
+      const token = localStorage.getItem("showcase-session");
+      const body = JSON.parse(atob(token.split(".")[0].replace(/-/g, "+").replace(/_/g, "/")));
+      return body.exp > Date.now() && NAME.test(body.login) ? { token, login: body.login } : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  function saveSession(token) {
+    try {
+      if (token) localStorage.setItem("showcase-session", token);
+      else localStorage.removeItem("showcase-session");
+    } catch (e) { /* fine */ }
+  }
+
+  // What this browser just saved, so the gallery shows it before the server's short cache catches up.
+  function readMine() {
+    try {
+      const mine = JSON.parse(localStorage.getItem("showcase-mine"));
+      return mine && Date.now() - Date.parse(mine.at) < 10 * 60 * 1000 ? mine : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  function saveMine(mine) {
+    try { localStorage.setItem("showcase-mine", JSON.stringify(mine)); } catch (e) { /* fine */ }
+  }
+
+  function showAddMe(query) {
     current = null;
     document.title = "Add my projects · " + (cfg.title || "Class Code Showcase");
     app.innerHTML = "";
     const page = el("section", "add-me");
-    page.append(backLink(), el("h1", null, "Add my projects"),
-      el("p", "muted", "Type your GitHub username, tick the projects you want to show, then confirm on GitHub."));
+    page.append(backLink(), el("h1", null, "Add my projects"));
+    app.append(page);
 
+    const params = new URLSearchParams(query || "");
+    if (params.get("session")) {
+      saveSession(params.get("session"));
+      history.replaceState(null, "", location.pathname + location.search + "#/add-me");
+    }
+    if (params.get("error")) {
+      page.append(el("p", "error", params.get("error") === "cancelled"
+        ? "Sign-in was cancelled. You can try again below."
+        : "Sign-in didn't work. Please try again."));
+    }
+    if (!cfg.api) {
+      formFlow(page);
+      return;
+    }
+    const session = readSession();
+    if (session) signedInFlow(page, session);
+    else signInFlow(page);
+  }
+
+  function signInFlow(page) {
+    page.append(el("p", "muted", "Sign in with GitHub, tick the projects you want to show, and click Save."));
+    const go = el("a", "btn primary big", "Sign in with GitHub");
+    go.href = cfg.api + "/api/login?return=" + encodeURIComponent(location.origin + location.pathname);
+    const note = el("p", "muted small",
+      "The site only learns your GitHub username. It can't see private repos or change anything in your account.");
+    const other = el("button", "link", "Can't sign in? Use a GitHub form instead.");
+    other.type = "button";
+    const formBox = el("div");
+    other.addEventListener("click", () => {
+      other.remove();
+      formFlow(formBox);
+    });
+    page.append(go, note, other, formBox);
+  }
+
+  async function signedInFlow(page, session) {
+    const who = el("div", "who-bar");
+    const out = el("button", "link", "Sign out");
+    out.type = "button";
+    out.addEventListener("click", () => {
+      saveSession(null);
+      route();
+    });
+    who.append(avatar(session.login), el("span", null, "Signed in as"), el("strong", null, session.login), out);
+    const results = el("div", "picker");
+    results.append(el("p", "muted", "Loading your projects…"));
+    page.append(who, results);
+
+    const loaded = await loadRepos(session.login);
+    if (loaded.error) {
+      results.replaceChildren(el("p", "error", loaded.error));
+      return;
+    }
+    const send = async (method, body, status) => {
+      status.className = "status";
+      status.textContent = method === "DELETE" ? "Taking your projects down…" : "Saving…";
+      try {
+        const res = await fetch(cfg.api + "/api/picks", {
+          method,
+          headers: { Authorization: "Bearer " + session.token, "Content-Type": "application/json" },
+          body: body ? JSON.stringify(body) : undefined
+        });
+        const answer = await res.json().catch(() => ({}));
+        if (res.status === 401) {
+          saveSession(null);
+          status.textContent = "Please sign in again.";
+          setTimeout(route, 1200);
+          return;
+        }
+        if (!res.ok) throw new Error(answer.error || "That didn't work.");
+        if (method === "DELETE") {
+          saveMine({ login: session.login, removed: true, at: new Date().toISOString() });
+        } else {
+          saveMine({ login: session.login, repos: answer.repos, at: answer.at });
+          justAdded = session.login;
+        }
+        location.hash = "#/";
+      } catch (err) {
+        status.className = "status bad";
+        status.textContent = err.message + " Please try again.";
+      }
+    };
+    renderPicker(results, session.login, loaded.repos, loaded.showing, {
+      save: (names, status) => send("PUT", { repos: names }, status),
+      remove: loaded.showing ? (status) => send("DELETE", null, status) : null
+    });
+  }
+
+  // Their repos (preloaded when we know them) and what shows on the site today.
+  async function loadRepos(login) {
+    let d = null;
+    try { d = await loadData(); } catch (err) { /* no list yet: ask GitHub */ }
+    const known = d && findPreloaded(d, login);
+    let repos;
+    if (known) {
+      repos = known.repos.map((r) => ({ name: r.name, language: r.language, pushed_at: r.pushedAt }));
+    } else {
+      try {
+        repos = await getJson("https://api.github.com/users/" + login + "/repos?type=owner&per_page=100&sort=pushed");
+      } catch (err) {
+        return { error: err.message === "not-found" ? "No GitHub user named " + login + "." : errorText(err) };
+      }
+      repos = repos.filter((r) => !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase());
+    }
+    let showing = null;
+    if (d) {
+      const live = await withLivePicks(d, true);
+      const hit = live.people.find((p) => p.login.toLowerCase() === login.toLowerCase());
+      if (hit) showing = new Set(hit.repos.map((r) => r.name.toLowerCase()));
+    }
+    return { repos, showing };
+  }
+
+  // The backup way: type a username, then confirm with a GitHub form in a new tab.
+  function formFlow(page) {
+    page.append(el("p", "muted", "Type your GitHub username, tick the projects you want to show, then confirm on GitHub."));
     const form = el("form", "find-form");
     const input = el("input");
     input.type = "text";
@@ -401,7 +606,6 @@
     form.append(input, names, find);
     const results = el("div", "picker");
     page.append(form, results);
-    app.append(page);
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -412,31 +616,15 @@
       }
       try { localStorage.setItem("showcase-username", login); } catch (err) { /* fine */ }
       results.replaceChildren(el("p", "muted", "Looking up " + login + "…"));
-      let d = null;
-      try { d = await loadData(); } catch (err) { /* no list yet: ask GitHub */ }
-      const known = d && findPreloaded(d, login);
-      let repos;
-      if (known) {
-        repos = known.repos.map((r) => ({ name: r.name, language: r.language, pushed_at: r.pushedAt }));
-      } else {
-        try {
-          repos = await getJson("https://api.github.com/users/" + login + "/repos?type=owner&per_page=100&sort=pushed");
-        } catch (err) {
-          results.replaceChildren(el("p", "error", err.message === "not-found" ? "No GitHub user named " + login + "." : errorText(err)));
-          return;
-        }
-        repos = repos.filter((r) => !r.fork && r.full_name.toLowerCase() !== SITE_REPO.toLowerCase());
-      }
-      // Tick what shows today if they've added before; otherwise their Java repos.
-      let showing = null;
-      const hit = d && d.people.find((p) => p.login.toLowerCase() === login.toLowerCase());
-      if (hit) showing = new Set(hit.repos.map((r) => r.name.toLowerCase()));
-      renderPicker(results, login, repos, showing);
+      const loaded = await loadRepos(login);
+      if (loaded.error) results.replaceChildren(el("p", "error", loaded.error));
+      else renderPicker(results, login, loaded.repos, loaded.showing, null);
     });
     if (input.value) form.requestSubmit();
   }
 
-  function renderPicker(box, login, repos, showing) {
+  // actions: { save(names, status), remove(status) } when signed in; null for the GitHub-form way.
+  function renderPicker(box, login, repos, showing, actions) {
     if (repos.length === 0) {
       box.replaceChildren(el("p", "empty", login + " has no public repos yet. Push a project from IntelliJ, then come back."));
       return;
@@ -465,34 +653,55 @@
     all.onclick = () => { list.querySelectorAll("input").forEach((c) => { c.checked = true; }); update(); };
     none.onclick = () => { list.querySelectorAll("input").forEach((c) => { c.checked = false; }); update(); };
     tools.append(count, all, none);
+    const status = el("div", "status");
+    const checked = () => [...list.querySelectorAll("input:checked")].map((c) => c.value);
 
-    const go = el("a", "btn primary", "Continue to GitHub");
-    go.target = "_blank";
-    go.rel = "noopener";
-    const steps = el("ol", "after");
-    const s1 = el("li");
-    s1.append("On GitHub, click ", el("strong", null, "Create"), ".");
-    steps.append(s1, el("li", null, "Come back to this tab. It takes you to the gallery with your projects."),
-      el("li", null, "Want to change them later? Do this again. Your newest one counts."));
+    let go;
+    let after;
+    if (actions) {
+      go = el("button", "btn primary big", showing ? "Save changes" : "Save and show my projects");
+      go.type = "button";
+      go.addEventListener("click", () => {
+        if (checked().length) actions.save(checked(), status);
+      });
+      after = el("div", "after-row");
+      after.append(el("span", "muted", "You can come back and change this any time."));
+      if (actions.remove) {
+        const remove = el("button", "link danger", "Take all my projects off the site");
+        remove.type = "button";
+        remove.addEventListener("click", () => actions.remove(status));
+        after.append(remove);
+      }
+    } else {
+      go = el("a", "btn primary", "Continue to GitHub");
+      go.target = "_blank";
+      go.rel = "noopener";
+      go.addEventListener("click", (e) => {
+        if (go.classList.contains("disabled")) {
+          e.preventDefault();
+          return;
+        }
+        waitForForm(status, login, new Date(Date.now() - 60000).toISOString());
+      });
+      after = el("ol", "after");
+      const s1 = el("li");
+      s1.append("On GitHub, click ", el("strong", null, "Create"), ".");
+      after.append(s1, el("li", null, "Come back to this tab. It takes you to the gallery with your projects."),
+        el("li", null, "Want to change them later? Do this again. Your newest one counts."));
+    }
 
     function update() {
-      const names = [...list.querySelectorAll("input:checked")].map((c) => c.value);
+      const names = checked();
       count.textContent = names.length + " of " + repos.length + " selected";
-      go.href = "https://github.com/" + SITE_REPO + "/issues/new?template=add-me.yml&title=" +
-        encodeURIComponent("Add me: " + login) + "&repos=" + encodeURIComponent(names.join("\n"));
+      if (!actions) {
+        go.href = "https://github.com/" + SITE_REPO + "/issues/new?template=add-me.yml&title=" +
+          encodeURIComponent("Add me: " + login) + "&repos=" + encodeURIComponent(names.join("\n"));
+      }
       go.classList.toggle("disabled", names.length === 0);
     }
     list.addEventListener("change", update);
-    const status = el("div", "status");
-    go.addEventListener("click", (e) => {
-      if (go.classList.contains("disabled")) {
-        e.preventDefault();
-        return;
-      }
-      waitForForm(status, login, new Date(Date.now() - 60000).toISOString());
-    });
     update();
-    box.replaceChildren(el("h2", null, "Pick your projects"), tools, list, go, status, steps);
+    box.replaceChildren(el("h2", null, "Pick your projects"), tools, list, go, status, after);
   }
 
   // Check GitHub for their new form when they come back to this tab (and on a button), not on a timer,

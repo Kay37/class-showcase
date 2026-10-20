@@ -164,7 +164,9 @@ const picks = new Map(); // lowercase login -> { login, repos: null or Set }
 const issues = (await gh("/repos/" + SITE + "/issues?labels=showcase&state=open&sort=created&direction=desc&per_page=100")) || [];
 for (const issue of issues) {
   if (issue.pull_request) continue;
-  const login = issue.user.login;
+  // Issues the sign-in server writes are opened by the owner's token and name the person in a marker line.
+  const marker = String(issue.body || "").match(/<!--\s*login:\s*([A-Za-z0-9_.-]+)\s*-->/);
+  const login = marker && issue.user.login.toLowerCase() === SITE.split("/")[0].toLowerCase() ? marker[1] : issue.user.login;
   if (!picks.has(login.toLowerCase())) picks.set(login.toLowerCase(), { login, repos: parsePicks(issue.body, login) });
 }
 

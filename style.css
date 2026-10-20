@@ -195,3 +195,13 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); fon
 .status .btn { margin-left: 4px; }
 .intro .status, .gallery > .status { margin: 0 0 16px; scroll-margin-top: 80px; }
 .person.mine { outline: 2px solid var(--accent); outline-offset: 8px; border-radius: var(--radius); }
+
+/* ---------- sign in ---------- */
+.btn.big { display: inline-block; padding: 12px 20px; font-size: 16px; margin: 8px 0 4px; }
+.small { font-size: 13px; }
+.who-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 4px; }
+.who-bar .avatar { width: 28px; height: 28px; }
+.who-bar .link { margin-left: 8px; }
+.after-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.link.danger { color: var(--error); }
+.status.bad { border-color: var(--error); color: var(--error); }
