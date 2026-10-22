@@ -210,6 +210,18 @@ const wantsEmails = (body) => /<!--\s*notify:\s*yes\s*-->/i.test(String(body || 
 
 const picks = new Map(); // lowercase login -> { login, repos: null or Set }
 const issues = (await gh("/repos/" + SITE + "/issues?labels=showcase&state=open&sort=created&direction=desc&per_page=100")) || [];
+// No "Add me" issues can mean nobody signed up, or that GitHub's issue list is broken (in an outage it
+// comes back empty). If the repo says it has open issues but the plain list shows none, stop without writing,
+// so this run fails and the site keeps the last good class list. Same check as the sign-in server.
+if (issues.length === 0) {
+  const any = (await gh("/repos/" + SITE + "/issues?state=open&per_page=1")) || [];
+  const repo = await gh("/repos/" + SITE);
+  if (any.length === 0 && repo && repo.open_issues_count > 0) {
+    console.error("GitHub's issue list is empty but the repo has " + repo.open_issues_count +
+      " open issues. GitHub may be having problems. Keeping the last class list.");
+    process.exit(1);
+  }
+}
 for (const issue of issues) {
   if (issue.pull_request) continue;
   // Issues the sign-in server writes are opened by the owner's token and name the person in a marker line.
